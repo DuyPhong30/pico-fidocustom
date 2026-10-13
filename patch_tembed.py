@@ -381,65 +381,38 @@ def patch_led_neopixel():
  * Customized for LILYGO T-Embed CC1101 Plus (ESP32-S3)
  */
 
-#include "led.h"
-#include "pico_time.h"
-#include <string.h>
+#include "picokeys.h"
+#include "led/led.h"
+#ifdef PICO_PLATFORM
+#include "hardware/gpio.h"
+#endif
 
 #ifdef ESP_PLATFORM
 
-#include "driver/rmt_tx.h"
-#include "led_strip_types.h"
-#include "led_strip_rmt.h"
-#include "led_strip.h"
+#include "driver/gpio.h"
+#include "neopixel.h"
+#include "pico_time.h"
 
-#define NEOPIXEL_PIN 14
 #define NEOPIXEL_COUNT 8
+#define NEOPIXEL_PIN GPIO_NUM_14
 
-static led_strip_handle_t led_strip = NULL;
-
-typedef struct {
-    uint8_t index;
-    uint32_t rgb;
-} single_neopixel_t;
-
-static single_neopixel_t spx[NEOPIXEL_COUNT];
+tNeopixelContext neopixel = NULL;
 
 static inline uint32_t neopixel_rgb_ordered(uint8_t r, uint8_t g, uint8_t b) {
-    return ((uint32_t)g << 16) | ((uint32_t)r << 8) | (uint32_t)b;
-}
-
-static void neopixel_show(void) {
-    if (led_strip == NULL) return;
-    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-        uint32_t val = spx[i].rgb;
-        uint8_t g = (val >> 16) & 0xFF;
-        uint8_t r = (val >> 8) & 0xFF;
-        uint8_t b = val & 0xFF;
-        led_strip_set_pixel(led_strip, i, r, g, b);
-    }
-    led_strip_refresh(led_strip);
+    return NP_RGB(g, r, b); // GRB order for WS2812B
 }
 
 void led_driver_init_neopixel(void) {
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = NEOPIXEL_PIN,
-        .max_leds = NEOPIXEL_COUNT,
-        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
-        .led_model = LED_MODEL_WS2812,
-        .flags.invert_out = false,
-    };
-    led_strip_rmt_config_t rmt_config = {
-        .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = 10 * 1000 * 1000,
-        .flags.with_dma = false,
-    };
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
-    led_strip_clear(led_strip);
-    memset(spx, 0, sizeof(spx));
+    uint8_t gpio = NEOPIXEL_PIN;
+    if (phy_data.led_gpio_present) {
+        gpio = phy_data.led_gpio;
+    }
+    neopixel = neopixel_Init(NEOPIXEL_COUNT, gpio);
 }
 
 void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float progress) {
-    if (spx == NULL) return;
+    static tNeopixel spx[NEOPIXEL_COUNT];
+    if (neopixel == NULL) return;
 
     // 1. Confirmed / Verification blink: Bright solid green on all LEDs!
     if (color == LED_COLOR_GREEN) {
@@ -447,7 +420,7 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
             spx[i].index = i;
             spx[i].rgb = neopixel_rgb_ordered(0, 255, 0);
         }
-        neopixel_show();
+        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
         return;
     }
 
@@ -471,7 +444,7 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
             spx[i].index = i;
             spx[i].rgb = neopixel_rgb_ordered(r, g, bl);
         }
-        neopixel_show();
+        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
         return;
     }
 
@@ -480,7 +453,7 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
         spx[i].index = i;
         spx[i].rgb = 0;
     }
-    neopixel_show();
+    neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
 }
 
 led_driver_t led_driver_neopixel = {
