@@ -627,23 +627,15 @@ led_driver_t led_driver_neopixel = {
     print("Patched led_neopixel.c")
 
 def patch_cmake():
-    p = os.path.join(SDK_DIR, "config", "esp32", "components", "pico-keys-sdk", "CMakeLists.txt")
+    p = os.path.join(SDK_DIR, "picokeys_sdk_import.cmake")
     if os.path.exists(p):
         with open(p, "r", encoding="utf-8") as f:
             c = f.read()
         if "tembed_display.c" not in c:
-            c = c.replace(
-                "SRCS ${PICOKEYS_SOURCES}",
-                "SRCS ${PICOKEYS_SOURCES} ${PICOKEYS_SDK_DIR}/src/tembed_display.c"
-            )
-        if "driver" not in c:
-            c = c.replace(
-                "mbedtls",
-                "mbedtls\\n    driver"
-            )
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(c)
-        print("Patched component CMakeLists.txt")
+            c += "\nlist(APPEND PICOKEYS_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/tembed_display.c)\n"
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(c)
+            print("Appended tembed_display.c to PICOKEYS_SOURCES")
 
 if __name__ == "__main__":
     print("Starting LILYGO T-Embed patch...")
