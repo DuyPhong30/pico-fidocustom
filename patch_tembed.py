@@ -363,14 +363,29 @@ def patch_led_c():
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if "&led_driver_neopixel;" in content:
-        print("led.c already patched.")
-        return
+    # Change ESP32-S3 default LED pin from GPIO 48 to GPIO 14 (Lilygo T-Embed WS2812 ring)
+    content = content.replace("GPIO_NUM_48", "GPIO_NUM_14")
 
-    content = content.replace("led_driver = &led_driver_pimoroni;", "led_driver = &led_driver_neopixel;")
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    print("Patched led.c to use led_driver_neopixel")
+    print("Patched led.c to use GPIO_NUM_14")
+
+def patch_led_h():
+    path = os.path.join(SDK_DIR, "src", "led", "led.h")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Set MODE_MOUNTED to LED_COLOR_OFF so LEDs stay off in idle
+    content = content.replace(
+        "MODE_MOUNTED     = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_GREEN << LED_COLOR_SHIFT)",
+        "MODE_MOUNTED     = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_OFF << LED_COLOR_SHIFT)"
+    )
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("Patched led.h for quiet idle mode")
 
 def patch_led_neopixel():
     path = os.path.join(SDK_DIR, "src", "led", "led_neopixel.c")
@@ -395,6 +410,7 @@ def patch_led_neopixel():
 
 #define NEOPIXEL_COUNT 8
 #define NEOPIXEL_PIN GPIO_NUM_14
+#define BRIGHTNESS_SCALE 0.10f
 
 tNeopixelContext neopixel = NULL;
 
@@ -403,22 +419,19 @@ static inline uint32_t neopixel_rgb_ordered(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void led_driver_init_neopixel(void) {
-    uint8_t gpio = NEOPIXEL_PIN;
-    if (phy_data.led_gpio_present) {
-        gpio = phy_data.led_gpio;
-    }
-    neopixel = neopixel_Init(NEOPIXEL_COUNT, gpio);
+    neopixel = neopixel_Init(NEOPIXEL_COUNT, NEOPIXEL_PIN);
 }
 
 void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float progress) {
     static tNeopixel spx[NEOPIXEL_COUNT];
     if (neopixel == NULL) return;
 
-    // 1. Confirmed / Verification blink: Bright solid green on all LEDs!
+    // 1. Confirmed / Verification blink: Soft emerald green flash (10% brightness)
     if (color == LED_COLOR_GREEN) {
+        uint8_t g = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             spx[i].index = i;
-            spx[i].rgb = neopixel_rgb_ordered(0, 255, 0);
+            spx[i].rgb = neopixel_rgb_ordered(0, g, 0);
         }
         neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
         return;
@@ -426,20 +439,21 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
 
     uint32_t mode = led_get_mode();
 
-    // 2. Waiting for confirmation (MODE_BUTTON): SPINNING COMET AROUND THE DIAL!
-    if (mode == MODE_BUTTON) {
+    // 2. Waiting for confirmation (MODE_BUTTON or LED_COLOR_YELLOW): Clockwise spinning amber comet!
+    if (mode == MODE_BUTTON || color == LED_COLOR_YELLOW) {
         uint32_t now = board_millis();
-        int head = (now / 70) % NEOPIXEL_COUNT; // Smooth rotating dial (~560ms per lap)
+        // Clockwise rotation around the dial: 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 -> 0
+        int head = (NEOPIXEL_COUNT - 1) - ((now / 70) % NEOPIXEL_COUNT);
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-            int dist = (head - i + NEOPIXEL_COUNT) % NEOPIXEL_COUNT;
+            int dist = (i - head + NEOPIXEL_COUNT) % NEOPIXEL_COUNT;
             float b = 0.0f;
             if (dist == 0) b = 1.0f;
             else if (dist == 1) b = 0.5f;
             else if (dist == 2) b = 0.2f;
-            else if (dist == 3) b = 0.04f;
+            else if (dist == 3) b = 0.05f;
 
-            uint8_t r = (uint8_t)(255 * b);
-            uint8_t g = (uint8_t)(140 * b);
+            uint8_t r = (uint8_t)(255.0f * b * BRIGHTNESS_SCALE);
+            uint8_t g = (uint8_t)(140.0f * b * BRIGHTNESS_SCALE);
             uint8_t bl = 0;
             spx[i].index = i;
             spx[i].rgb = neopixel_rgb_ordered(r, g, bl);
@@ -485,6 +499,7 @@ if __name__ == "__main__":
     patch_main_c()
     patch_button_c()
     patch_led_c()
+    patch_led_h()
     patch_led_neopixel()
     patch_cmake()
     print("All patches successfully applied.")
