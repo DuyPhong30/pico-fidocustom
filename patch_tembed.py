@@ -426,7 +426,7 @@ static volatile tembed_led_state_t led_ui_state = TEMBED_LED_IDLE;
 static volatile uint32_t led_ui_until_ms = 0;
 
 static inline uint32_t neopixel_rgb_ordered(uint8_t r, uint8_t g, uint8_t b) {
-    return NP_RGB(g, r, b); // GRB order for WS2812B
+    return NP_RGB(r, g, b);
 }
 
 static int neopixel_signal_cb(signal_code_t code, void *data) {
