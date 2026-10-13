@@ -198,7 +198,7 @@ static void tembed_ui_task(void *pvParameters) {
     while (1) {
         TickType_t wait_ticks = portMAX_DELAY;
         if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
-            wait_ticks = pdMS_TO_TICKS(2500); // Keep Confirmed / Timeout card for 2.5s
+            wait_ticks = pdMS_TO_TICKS(2000); // Keep Confirmed / Timeout card for 2.0s
         }
 
         if (xQueueReceive(ui_queue, &new_state, wait_ticks)) {
@@ -207,7 +207,7 @@ static void tembed_ui_task(void *pvParameters) {
                 tembed_draw_screen(current_state);
             }
         } else {
-            // After 2.5s in SUCCESS or ERROR, return to READY (sleeping cat)
+            // After 2.0s in SUCCESS or ERROR, return to READY (sleeping cat)
             if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
                 current_state = TEMBED_UI_READY;
                 tembed_draw_screen(TEMBED_UI_READY);
@@ -398,6 +398,7 @@ def patch_led_neopixel():
 
 #include "picokeys.h"
 #include "led/led.h"
+#include "signal.h"
 #ifdef PICO_PLATFORM
 #include "hardware/gpio.h"
 #endif
@@ -414,34 +415,96 @@ def patch_led_neopixel():
 
 tNeopixelContext neopixel = NULL;
 
+typedef enum {
+    TEMBED_LED_IDLE = 0,
+    TEMBED_LED_WAITING,
+    TEMBED_LED_SUCCESS,
+    TEMBED_LED_TIMEOUT,
+} tembed_led_state_t;
+
+static volatile tembed_led_state_t led_ui_state = TEMBED_LED_IDLE;
+static volatile uint32_t led_ui_until_ms = 0;
+
 static inline uint32_t neopixel_rgb_ordered(uint8_t r, uint8_t g, uint8_t b) {
     return NP_RGB(g, r, b); // GRB order for WS2812B
 }
 
+static int neopixel_signal_cb(signal_code_t code, void *data) {
+    (void)data;
+    uint32_t now = board_millis();
+    switch (code) {
+        case SIGNAL_USER_PRESENCE_REQUEST:
+            led_ui_state = TEMBED_LED_WAITING;
+            break;
+        case SIGNAL_USER_PRESENCE_COMPLETED:
+            led_ui_state = TEMBED_LED_SUCCESS;
+            led_ui_until_ms = now + 2000; // Solid green for 2 seconds
+            break;
+        case SIGNAL_USER_PRESENCE_TIMEOUT:
+            led_ui_state = TEMBED_LED_TIMEOUT;
+            led_ui_until_ms = now + 2000; // Solid red for 2 seconds
+            break;
+        case SIGNAL_USER_PRESENCE_CANCELLED:
+        case SIGNAL_BOOT:
+        case SIGNAL_USB_MOUNTED:
+            led_ui_state = TEMBED_LED_IDLE;
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
 void led_driver_init_neopixel(void) {
     neopixel = neopixel_Init(NEOPIXEL_COUNT, NEOPIXEL_PIN);
+    signal_add(SIGNAL_USER_PRESENCE_REQUEST, SIGNAL_FLAG_NONE, neopixel_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, neopixel_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, neopixel_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_CANCELLED, SIGNAL_FLAG_NONE, neopixel_signal_cb);
+    signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, neopixel_signal_cb);
+    signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, neopixel_signal_cb);
 }
 
 void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float progress) {
     static tNeopixel spx[NEOPIXEL_COUNT];
     if (neopixel == NULL) return;
 
-    // 1. Confirmed / Verification blink: Soft emerald green flash (10% brightness)
-    if (color == LED_COLOR_GREEN) {
-        uint8_t g = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
-        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-            spx[i].index = i;
-            spx[i].rgb = neopixel_rgb_ordered(0, g, 0);
+    uint32_t now = board_millis();
+
+    // 1. User pressed button / verified: Solid GREEN for 2.0s!
+    if (led_ui_state == TEMBED_LED_SUCCESS) {
+        if (now < led_ui_until_ms) {
+            uint8_t g = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
+            for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+                spx[i].index = i;
+                spx[i].rgb = neopixel_rgb_ordered(0, g, 0);
+            }
+            neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
+            return;
+        } else {
+            led_ui_state = TEMBED_LED_IDLE;
         }
-        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
-        return;
+    }
+
+    // 2. Request timed out: Solid RED for 2.0s!
+    if (led_ui_state == TEMBED_LED_TIMEOUT) {
+        if (now < led_ui_until_ms) {
+            uint8_t r = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
+            for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+                spx[i].index = i;
+                spx[i].rgb = neopixel_rgb_ordered(r, 0, 0);
+            }
+            neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
+            return;
+        } else {
+            led_ui_state = TEMBED_LED_IDLE;
+        }
     }
 
     uint32_t mode = led_get_mode();
 
-    // 2. Waiting for confirmation (MODE_BUTTON or LED_COLOR_YELLOW): Clockwise spinning amber comet!
-    if (mode == MODE_BUTTON || color == LED_COLOR_YELLOW) {
-        uint32_t now = board_millis();
+    // 3. Waiting for user presence / button press: Clockwise rotating amber comet!
+    if (led_ui_state == TEMBED_LED_WAITING || mode == MODE_BUTTON || color == LED_COLOR_YELLOW) {
         // Clockwise rotation around the dial: 7 -> 6 -> 5 -> 4 -> 3 -> 2 -> 1 -> 0
         int head = (NEOPIXEL_COUNT - 1) - ((now / 70) % NEOPIXEL_COUNT);
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
@@ -462,7 +525,7 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
         return;
     }
 
-    // 3. Idle mode / USB Mounted / Off: KEEP ALL LEDS OFF (clean & calm)
+    // 4. Idle mode / USB Mounted / Off: All 8 LEDs completely OFF (clean & calm)
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
         spx[i].index = i;
         spx[i].rgb = 0;
