@@ -1,0 +1,62 @@
+name: Build LILYGO T-Embed FIDO2 Security Key
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build T-Embed ESP32-S3 Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Apply LILYGO T-Embed Hardware Patches
+        run: |
+          python3 patch_tembed.py
+
+      - name: Install ESP-IDF Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git wget flex bison gperf python3 python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+      - name: Setup ESP-IDF v5.5.1
+        run: |
+          git clone --depth 1 -b v5.5.1 --recursive https://github.com/espressif/esp-idf.git
+          cd esp-idf
+          ./install.sh esp32s3
+
+      - name: Compile and Merge Firmware
+        run: |
+          . esp-idf/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+          mkdir -p release
+          cd build
+          esptool.py --chip ESP32-S3 merge_bin -o ../release/pico_fido_tembed.bin @flash_args
+
+      - name: Upload Firmware Binary as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico_fido_tembed
+          path: release/pico_fido_tembed.bin
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: v1.0-tembed
+          name: "LILYGO T-Embed FIDO2 Firmware (v1.0)"
+          files: release/pico_fido_tembed.bin
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
