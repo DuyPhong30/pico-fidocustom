@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 patch_tembed.py
-Automated patch script for LILYGO T-Embed CC1101 Plus (ESP32-S3)
-Applies complete hardware support for:
-1. Power Gate (GPIO 15) & Screen Backlight (GPIO 21)
-2. Rotary encoder center button presence (GPIO 0 with internal pullup)
-3. 8x WS2812 NeoPixel ring on GPIO 14 with rotating dial animation
-4. ST7789 170x320 IPS display with live FIDO2 status UI
+Complete LILYGO T-Embed hardware customization for FIDO2 Security Key
+1. Power gate GPIO 15 & Backlight GPIO 21
+2. Rotary encoder button GPIO 0 with strict User Presence (waits for press)
+3. 8-LED WS2812 ring on GPIO 14: OFF in idle, SPINS when waiting, GREEN on confirmed
+4. ST7789 170x320 portrait display: Ginger Cat pixel art UI (Idle, Waiting, Confirmed, Timeout)
 """
 
 import os
+import shutil
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SDK_DIR = os.path.join(ROOT, "pico-keys-sdk")
@@ -38,6 +38,7 @@ void tembed_display_set_state(tembed_ui_state_t state);
 """
 
 TEMBED_DISPLAY_C = """#include "tembed_display.h"
+#include "tembed_images.h"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -53,124 +54,13 @@ TEMBED_DISPLAY_C = """#include "tembed_display.h"
 #define TFT_BL   21
 #define TFT_PWR  15
 
-#define SCREEN_W 320
-#define SCREEN_H 170
-#define OFFSET_X 0
-#define OFFSET_Y 35
-
-// RGB565 Colors
-#define COLOR_BLACK       0x0000
-#define COLOR_NAVY        0x0010
-#define COLOR_DARKBLUE    0x0115
-#define COLOR_WHITE       0xFFFF
-#define COLOR_RED         0xF800
-#define COLOR_GREEN       0x07E0
-#define COLOR_CYAN        0x07FF
-#define COLOR_YELLOW      0xFFE0
-#define COLOR_ORANGE      0xFD20
-#define COLOR_GRAY        0x7BEF
-#define COLOR_DARKGRAY    0x31A6
+#define SCREEN_W 170
+#define SCREEN_H 320
+#define OFFSET_X 35
+#define OFFSET_Y 0
 
 static spi_device_handle_t spi_lcd = NULL;
 static QueueHandle_t ui_queue = NULL;
-
-static const uint8_t font8x8[95][8] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 32 ' '
-    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // 33 '!'
-    {0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00}, // 34 '"'
-    {0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00}, // 35 '#'
-    {0x18,0x3E,0x60,0x3C,0x06,0x7C,0x18,0x00}, // 36 '$'
-    {0x00,0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00}, // 37 '%'
-    {0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0x00}, // 38 '&'
-    {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00}, // 39 '''
-    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, // 40 '('
-    {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00}, // 41 ')'
-    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // 42 '*'
-    {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00}, // 43 '+'
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // 44 ','
-    {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, // 45 '-'
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, // 46 '.'
-    {0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00}, // 47 '/'
-    {0x7C,0xC6,0xCE,0xD6,0xE6,0xC6,0x7C,0x00}, // 48 '0'
-    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00}, // 49 '1'
-    {0x7C,0xC6,0x06,0x1C,0x30,0x66,0xFE,0x00}, // 50 '2'
-    {0x7C,0xC6,0x06,0x3C,0x06,0xC6,0x7C,0x00}, // 51 '3'
-    {0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x1E,0x00}, // 52 '4'
-    {0xFE,0xC0,0xFC,0x06,0x06,0xC6,0x7C,0x00}, // 53 '5'
-    {0x38,0x60,0xC0,0xFC,0xC6,0xC6,0x7C,0x00}, // 54 '6'
-    {0xFE,0xC6,0x0C,0x18,0x30,0x30,0x30,0x00}, // 55 '7'
-    {0x7C,0xC6,0xC6,0x7C,0xC6,0xC6,0x7C,0x00}, // 56 '8'
-    {0x7C,0xC6,0xC6,0x7E,0x06,0x0C,0x78,0x00}, // 57 '9'
-    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, // 58 ':'
-    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30}, // 59 ';'
-    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // 60 '<'
-    {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}, // 61 '='
-    {0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00}, // 62 '>'
-    {0x7C,0xC6,0x0C,0x18,0x18,0x00,0x18,0x00}, // 63 '?'
-    {0x7C,0xC6,0xDE,0xDE,0xDC,0xC0,0x7C,0x00}, // 64 '@'
-    {0x38,0x6C,0xC6,0xFE,0xC6,0xC6,0xC6,0x00}, // 65 'A'
-    {0xFC,0x66,0x66,0x7C,0x66,0x66,0xFC,0x00}, // 66 'B'
-    {0x3C,0x66,0xC0,0xC0,0xC0,0x66,0x3C,0x00}, // 67 'C'
-    {0xF8,0x6C,0x66,0x66,0x66,0x6C,0xF8,0x00}, // 68 'D'
-    {0xFE,0x62,0x68,0x78,0x68,0x62,0xFE,0x00}, // 69 'E'
-    {0xFE,0x62,0x68,0x78,0x68,0x60,0xF0,0x00}, // 70 'F'
-    {0x3C,0x66,0xC0,0xC0,0xCE,0x66,0x3E,0x00}, // 71 'G'
-    {0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0x00}, // 72 'H'
-    {0x7E,0x18,0x18,0x18,0x18,0x18,0x7E,0x00}, // 73 'I'
-    {0x1E,0x0C,0x0C,0x0C,0xCC,0xCC,0x78,0x00}, // 74 'J'
-    {0xE6,0x66,0x6C,0x78,0x6C,0x66,0xE6,0x00}, // 75 'K'
-    {0xF0,0x60,0x60,0x60,0x62,0x66,0xFE,0x00}, // 76 'L'
-    {0xC6,0xEE,0xFE,0xFE,0xD6,0xC6,0xC6,0x00}, // 77 'M'
-    {0xC6,0xE6,0xF6,0xFE,0xDE,0xCE,0xC6,0x00}, // 78 'N'
-    {0x7C,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 79 'O'
-    {0xFC,0x66,0x66,0x7C,0x60,0x60,0xF0,0x00}, // 80 'P'
-    {0x7C,0xC6,0xC6,0xC6,0xD6,0xDE,0x7C,0x0E}, // 81 'Q'
-    {0xFC,0x66,0x66,0x7C,0x6C,0x66,0xE6,0x00}, // 82 'R'
-    {0x7C,0xC6,0x60,0x38,0x0C,0xC6,0x7C,0x00}, // 83 'S'
-    {0x7E,0x5A,0x18,0x18,0x18,0x18,0x3C,0x00}, // 84 'T'
-    {0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 85 'U'
-    {0xC6,0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x00}, // 86 'V'
-    {0xC6,0xC6,0xC6,0xD6,0xFE,0xEE,0xC6,0x00}, // 87 'W'
-    {0xC6,0xC6,0x6C,0x38,0x6C,0xC6,0xC6,0x00}, // 88 'X'
-    {0x66,0x66,0x66,0x3C,0x18,0x18,0x3C,0x00}, // 89 'Y'
-    {0xFE,0xC6,0x0C,0x18,0x30,0x62,0xFE,0x00}, // 90 'Z'
-    {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00}, // 91 '['
-    {0xC0,0x60,0x30,0x18,0x0C,0x06,0x02,0x00}, // 92 '\'
-    {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00}, // 93 ']'
-    {0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00}, // 94 '^'
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // 95 '_'
-    {0x30,0x18,0x0C,0x00,0x00,0x00,0x00,0x00}, // 96 '`'
-    {0x00,0x00,0x78,0x0C,0x7C,0xCC,0x76,0x00}, // 97 'a'
-    {0xE0,0x60,0x7C,0x66,0x66,0x66,0xDC,0x00}, // 98 'b'
-    {0x00,0x00,0x78,0xCC,0xC0,0xCC,0x78,0x00}, // 99 'c'
-    {0x1C,0x0C,0x7C,0xCC,0xCC,0xCC,0x76,0x00}, // 100 'd'
-    {0x00,0x00,0x78,0xCC,0xFC,0xC0,0x78,0x00}, // 101 'e'
-    {0x38,0x6C,0x60,0xF0,0x60,0x60,0xF0,0x00}, // 102 'f'
-    {0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0xF8}, // 103 'g'
-    {0xE0,0x60,0x6C,0x76,0x66,0x66,0xE6,0x00}, // 104 'h'
-    {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00}, // 105 'i'
-    {0x06,0x00,0x0E,0x06,0x06,0x66,0x66,0x3C}, // 106 'j'
-    {0xE0,0x60,0x66,0x6C,0x78,0x6C,0xE6,0x00}, // 107 'k'
-    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, // 108 'l'
-    {0x00,0x00,0xEC,0xFE,0xD6,0xD6,0xD6,0x00}, // 109 'm'
-    {0x00,0x00,0xDC,0x66,0x66,0x66,0x66,0x00}, // 110 'n'
-    {0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7C,0x00}, // 111 'o'
-    {0x00,0x00,0xDC,0x66,0x66,0x7C,0x60,0xF0}, // 112 'p'
-    {0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0x1E}, // 113 'q'
-    {0x00,0x00,0xDC,0x76,0x60,0x60,0xF0,0x00}, // 114 'r'
-    {0x00,0x00,0x7C,0xC0,0x78,0x06,0xFC,0x00}, // 115 's'
-    {0x30,0x30,0xFC,0x30,0x30,0x34,0x18,0x00}, // 116 't'
-    {0x00,0x00,0xCC,0xCC,0xCC,0xCC,0x76,0x00}, // 117 'u'
-    {0x00,0x00,0xC6,0xC6,0xC6,0x6C,0x38,0x00}, // 118 'v'
-    {0x00,0x00,0xC6,0xD6,0xFE,0xFE,0x6C,0x00}, // 119 'w'
-    {0x00,0x00,0xC6,0x6C,0x38,0x6C,0xC6,0x00}, // 120 'x'
-    {0x00,0x00,0xC6,0xC6,0xC6,0x7E,0x06,0xFC}, // 121 'y'
-    {0x00,0x00,0x7E,0x4C,0x18,0x32,0x7E,0x00}, // 122 'z'
-    {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00}, // 123 '{'
-    {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, // 124 '|'
-    {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00}, // 125 '}'
-    {0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00}  // 126 '~'
-};
 
 static void lcd_cmd(uint8_t cmd) {
     gpio_set_level(TFT_DC, 0);
@@ -212,57 +102,27 @@ static void st7789_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1
     lcd_cmd(0x2C);
 }
 
-static void st7789_fill_rect(uint16_t x0, uint16_t y0, uint16_t w, uint16_t h, uint16_t color) {
-    if (x0 >= SCREEN_W || y0 >= SCREEN_H || w == 0 || h == 0) return;
-    if (x0 + w > SCREEN_W) w = SCREEN_W - x0;
-    if (y0 + h > SCREEN_H) h = SCREEN_H - y0;
-
-    st7789_set_window(x0, y0, x0 + w - 1, y0 + h - 1);
-
-    uint8_t byte_hi = color >> 8;
-    uint8_t byte_lo = color & 0xFF;
-    uint16_t swapped = (byte_lo << 8) | byte_hi;
-
-    static uint16_t line_buf[SCREEN_W];
-    for (int i = 0; i < w; i++) line_buf[i] = swapped;
-
-    for (int y = 0; y < h; y++) {
-        lcd_data((uint8_t*)line_buf, w * 2);
-    }
-}
-
-static void st7789_draw_char(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale) {
-    if (c < 32 || c > 126) c = ' ';
-    const uint8_t *bitmap = font8x8[c - 32];
-
-    for (int col = 0; col < 8; col++) {
-        uint8_t line = bitmap[col];
-        for (int bit = 0; bit < 8; bit++) {
-            uint16_t color = (line & (1 << (7 - bit))) ? fg : bg;
-            if (scale == 1) {
-                st7789_fill_rect(x + bit, y + col, 1, 1, color);
-            } else {
-                st7789_fill_rect(x + bit * scale, y + col * scale, scale, scale, color);
+static void st7789_draw_rle(const uint8_t *rle_data, size_t rle_len) {
+    st7789_set_window(0, 0, SCREEN_W - 1, SCREEN_H - 1);
+    static uint8_t chunk[512];
+    size_t chunk_idx = 0;
+    size_t i = 0;
+    while (i < rle_len) {
+        uint8_t count = rle_data[i++];
+        uint8_t hi = rle_data[i++];
+        uint8_t lo = rle_data[i++];
+        for (int c = 0; c < count; c++) {
+            chunk[chunk_idx++] = hi;
+            chunk[chunk_idx++] = lo;
+            if (chunk_idx >= sizeof(chunk)) {
+                lcd_data(chunk, chunk_idx);
+                chunk_idx = 0;
             }
         }
     }
-}
-
-static void st7789_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t scale) {
-    uint16_t cur_x = x;
-    while (*str) {
-        st7789_draw_char(cur_x, y, *str, fg, bg, scale);
-        cur_x += 8 * scale;
-        str++;
+    if (chunk_idx > 0) {
+        lcd_data(chunk, chunk_idx);
     }
-}
-
-static void st7789_draw_string_centered(uint16_t y, const char *str, uint16_t fg, uint16_t bg, uint8_t scale) {
-    int len = strlen(str);
-    int total_w = len * 8 * scale;
-    int x = (SCREEN_W - total_w) / 2;
-    if (x < 0) x = 0;
-    st7789_draw_string(x, y, str, fg, bg, scale);
 }
 
 static void st7789_hw_init(void) {
@@ -276,7 +136,7 @@ static void st7789_hw_init(void) {
         .sclk_io_num = TFT_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = SCREEN_W * 2 + 8,
+        .max_transfer_sz = 1024,
     };
     spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
 
@@ -297,8 +157,8 @@ static void st7789_hw_init(void) {
     lcd_cmd(0x3A);
     lcd_data_byte(0x55);
 
-    lcd_cmd(0x36);
-    lcd_data_byte(0x70);
+    lcd_cmd(0x36); // Portrait mode (colstart=35, rowstart=0)
+    lcd_data_byte(0x00);
 
     lcd_cmd(0x21);
     lcd_cmd(0x13);
@@ -311,42 +171,17 @@ static void st7789_hw_init(void) {
 static void tembed_draw_screen(tembed_ui_state_t state) {
     switch (state) {
         case TEMBED_UI_READY:
-            st7789_fill_rect(0, 0, SCREEN_W, SCREEN_H, COLOR_NAVY);
-            st7789_fill_rect(0, 0, SCREEN_W, 28, COLOR_DARKBLUE);
-            st7789_draw_string_centered(8, "LILYGO T-EMBED FIDO2", COLOR_CYAN, COLOR_DARKBLUE, 2);
-
-            st7789_fill_rect(20, 48, SCREEN_W - 40, 60, COLOR_DARKGRAY);
-            st7789_draw_string_centered(60, "KEY READY", COLOR_GREEN, COLOR_DARKGRAY, 2);
-            st7789_draw_string_centered(86, "Security Key Active", COLOR_WHITE, COLOR_DARKGRAY, 1);
-
-            st7789_draw_string_centered(128, "Waiting for WebAuthn request...", COLOR_GRAY, COLOR_NAVY, 1);
-            st7789_draw_string_centered(146, "Press dial to test presence", COLOR_GRAY, COLOR_NAVY, 1);
+            st7789_draw_rle(img_idle_rle, img_idle_len);
             break;
-
         case TEMBED_UI_WAIT_USER:
-            st7789_fill_rect(0, 0, SCREEN_W, SCREEN_H, COLOR_BLACK);
-            st7789_fill_rect(0, 0, SCREEN_W, 28, COLOR_ORANGE);
-            st7789_draw_string_centered(8, "! TOUCH REQUIRED !", COLOR_BLACK, COLOR_ORANGE, 2);
-
-            st7789_fill_rect(10, 42, SCREEN_W - 20, 80, COLOR_DARKGRAY);
-            st7789_draw_string_centered(54, "USER PRESENCE", COLOR_YELLOW, COLOR_DARKGRAY, 2);
-            st7789_draw_string_centered(82, ">> PRESS DIAL BUTTON <<", COLOR_WHITE, COLOR_DARKGRAY, 2);
-
-            st7789_draw_string_centered(138, "LED Ring Spinning...", COLOR_YELLOW, COLOR_BLACK, 1);
+            st7789_draw_rle(img_waiting_rle, img_waiting_len);
             break;
-
         case TEMBED_UI_SUCCESS:
-            st7789_fill_rect(0, 0, SCREEN_W, SCREEN_H, COLOR_NAVY);
-            st7789_fill_rect(0, 0, SCREEN_W, 28, COLOR_GREEN);
-            st7789_draw_string_centered(8, "AUTHENTICATED", COLOR_BLACK, COLOR_GREEN, 2);
-
-            st7789_fill_rect(20, 50, SCREEN_W - 40, 60, COLOR_DARKBLUE);
-            st7789_draw_string_centered(64, "ACCESS GRANTED!", COLOR_GREEN, COLOR_DARKBLUE, 2);
-            st7789_draw_string_centered(90, "Presence Verified", COLOR_WHITE, COLOR_DARKBLUE, 1);
-
-            st7789_draw_string_centered(138, "Returning to PC...", COLOR_CYAN, COLOR_NAVY, 1);
+            st7789_draw_rle(img_confirmed_rle, img_confirmed_len);
             break;
-
+        case TEMBED_UI_ERROR:
+            st7789_draw_rle(img_timeout_rle, img_timeout_len);
+            break;
         default:
             break;
     }
@@ -361,10 +196,21 @@ static void tembed_ui_task(void *pvParameters) {
     tembed_ui_state_t new_state;
 
     while (1) {
-        if (xQueueReceive(ui_queue, &new_state, portMAX_DELAY)) {
+        TickType_t wait_ticks = portMAX_DELAY;
+        if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
+            wait_ticks = pdMS_TO_TICKS(2500); // Keep Confirmed / Timeout card for 2.5s
+        }
+
+        if (xQueueReceive(ui_queue, &new_state, wait_ticks)) {
             if (new_state != current_state) {
                 current_state = new_state;
                 tembed_draw_screen(current_state);
+            }
+        } else {
+            // After 2.5s in SUCCESS or ERROR, return to READY (sleeping cat)
+            if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
+                current_state = TEMBED_UI_READY;
+                tembed_draw_screen(TEMBED_UI_READY);
             }
         }
     }
@@ -389,8 +235,10 @@ static int tembed_signal_cb(signal_code_t code, void *data) {
         case SIGNAL_USER_PRESENCE_COMPLETED:
             tembed_display_set_state(TEMBED_UI_SUCCESS);
             break;
-        case SIGNAL_USER_PRESENCE_CANCELLED:
         case SIGNAL_USER_PRESENCE_TIMEOUT:
+            tembed_display_set_state(TEMBED_UI_ERROR);
+            break;
+        case SIGNAL_USER_PRESENCE_CANCELLED:
             tembed_display_set_state(TEMBED_UI_READY);
             break;
         default:
@@ -411,6 +259,13 @@ void tembed_display_start(void) {
     signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, tembed_signal_cb);
 }
 """
+
+def copy_images():
+    src = os.path.join(ROOT, "tembed_images.h")
+    dst = os.path.join(SDK_DIR, "src", "tembed_images.h")
+    if os.path.exists(src):
+        shutil.copy(src, dst)
+        print("Copied tembed_images.h to SDK")
 
 def create_display_files():
     src_dir = os.path.join(SDK_DIR, "src")
@@ -455,9 +310,51 @@ int app_main(void) {
     tembed_display_start();"""
     content = content.replace(target, replacement, 1)
 
+    # Ensure pullup is maintained even when BOOT_PIN is initialized
+    content = content.replace(
+        "gpio_pulldown_dis(BOOT_PIN);",
+        "gpio_pulldown_dis(BOOT_PIN);\n    gpio_pullup_en(BOOT_PIN);"
+    )
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     print("Patched main.c")
+
+def patch_button_c():
+    path = os.path.join(SDK_DIR, "src", "button.c")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Force button timeout to 30s
+    content = content.replace(
+        "return phy_data.up_btn_present ? phy_data.up_btn : 0;",
+        "return 30;"
+    )
+
+    # 2. In button_wait_start_timeout, force button wait unconditionally
+    target_start = "void button_wait_start_timeout(uint32_t timeout_seconds) {"
+    replacement_start = """void button_wait_start_timeout(uint32_t timeout_seconds) {
+    force_button_wait = true;
+    if (timeout_seconds == 0) timeout_seconds = 30;"""
+    content = content.replace(target_start, replacement_start, 1)
+
+    # 3. Reset async_button_pressed to false initially
+    content = content.replace(
+        "async_button_pressed = picok_board_button_read();",
+        "async_button_pressed = false;"
+    )
+
+    # 4. In button_wait_poll, trigger immediately when rotary knob button is pressed
+    content = content.replace(
+        "else if (async_button_pressed && !pressed) {",
+        "else if (pressed || (async_button_pressed && !pressed)) {"
+    )
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("Patched button.c")
 
 def patch_led_c():
     path = os.path.join(SDK_DIR, "src", "led", "led.c")
@@ -466,153 +363,124 @@ def patch_led_c():
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    content = content.replace("GPIO_NUM_48", "GPIO_NUM_14")
+    if "&led_driver_neopixel;" in content:
+        print("led.c already patched.")
+        return
 
+    content = content.replace("led_driver = &led_driver_pimoroni;", "led_driver = &led_driver_neopixel;")
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    print("Patched led.c")
+    print("Patched led.c to use led_driver_neopixel")
 
 def patch_led_neopixel():
     path = os.path.join(SDK_DIR, "src", "led", "led_neopixel.c")
     if not os.path.exists(path):
         return
 
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    if "Rotating spinner animation around the rotary encoder dial!" in content:
-        print("led_neopixel.c already patched.")
-        return
-
     custom_code = '''/*
  * Customized for LILYGO T-Embed CC1101 Plus (ESP32-S3)
  */
 
-#include "picokeys.h"
-#include "led/led.h"
-#ifdef PICO_PLATFORM
-#include "hardware/gpio.h"
-#endif
+#include "led.h"
+#include "pico_time.h"
+#include <string.h>
 
 #ifdef ESP_PLATFORM
 
-#include "driver/gpio.h"
-#include "neopixel.h"
-#include "pico_time.h"
+#include "driver/rmt_tx.h"
+#include "led_strip_types.h"
+#include "led_strip_rmt.h"
+#include "led_strip.h"
 
+#define NEOPIXEL_PIN 14
 #define NEOPIXEL_COUNT 8
 
-tNeopixelContext neopixel = NULL;
+static led_strip_handle_t led_strip = NULL;
 
-tNeopixel pixel[] = {
-    { 0, NP_RGB(0,  0,  0) }, /* off */
-    { 0, NP_RGB(255,  0, 0) }, /* red */
-    { 0, NP_RGB(0, 255,  0) }, /* green */
-    { 0, NP_RGB(0, 0,  255) }, /* blue */
-    { 0, NP_RGB(255,  255, 0) }, /* yellow */
-    { 0, NP_RGB(255,  0, 255) }, /* magenta */
-    { 0, NP_RGB(0, 255,  255) }, /* cyan */
-    { 0, NP_RGB(255, 255,  255) }, /* white */
-};
+typedef struct {
+    uint8_t index;
+    uint32_t rgb;
+} single_neopixel_t;
+
+static single_neopixel_t spx[NEOPIXEL_COUNT];
 
 static inline uint32_t neopixel_rgb_ordered(uint8_t r, uint8_t g, uint8_t b) {
-    switch (phy_data.led_order) {
-        case PHY_LED_ORDER_RGB:
-            return NP_RGB(r, g, b);
-        case PHY_LED_ORDER_RBG:
-            return NP_RGB(r, b, g);
-        case PHY_LED_ORDER_GBR:
-            return NP_RGB(g, b, r);
-        case PHY_LED_ORDER_BRG:
-            return NP_RGB(b, r, g);
-        case PHY_LED_ORDER_BGR:
-            return NP_RGB(b, g, r);
-        case PHY_LED_ORDER_GRB:
-        default:
-            return NP_RGB(g, r, b); // Default to GRB for WS2812B LEDs
-    }
+    return ((uint32_t)g << 16) | ((uint32_t)r << 8) | (uint32_t)b;
 }
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-    #define NEOPIXEL_PIN GPIO_NUM_14
-#elif defined(CONFIG_IDF_TARGET_ESP32S2)
-    #define NEOPIXEL_PIN GPIO_NUM_15
-#elif defined(CONFIG_IDF_TARGET_ESP32C6)
-    #define NEOPIXEL_PIN GPIO_NUM_8
-#else
-    #define NEOPIXEL_PIN GPIO_NUM_27
-#endif
+static void neopixel_show(void) {
+    if (led_strip == NULL) return;
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        uint32_t val = spx[i].rgb;
+        uint8_t g = (val >> 16) & 0xFF;
+        uint8_t r = (val >> 8) & 0xFF;
+        uint8_t b = val & 0xFF;
+        led_strip_set_pixel(led_strip, i, r, g, b);
+    }
+    led_strip_refresh(led_strip);
+}
 
 void led_driver_init_neopixel(void) {
-    uint8_t gpio = NEOPIXEL_PIN;
-    if (phy_data.led_gpio_present) {
-        gpio = phy_data.led_gpio;
-    }
-    neopixel = neopixel_Init(NEOPIXEL_COUNT, gpio);
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = NEOPIXEL_PIN,
+        .max_leds = NEOPIXEL_COUNT,
+        .led_pixel_format = LED_PIXEL_FORMAT_GRB,
+        .led_model = LED_MODEL_WS2812,
+        .flags.invert_out = false,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .flags.with_dma = false,
+    };
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+    led_strip_clear(led_strip);
+    memset(spx, 0, sizeof(spx));
 }
 
 void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float progress) {
-    static tNeopixel spx[NEOPIXEL_COUNT];
-    if (!(phy_data.opts & PHY_OPT_DIMM)) {
-        progress = progress >= 0.5 ? 1 : 0;
-    }
-    uint32_t led_phy_btness = phy_data.led_brightness_present ? phy_data.led_brightness : MAX_BTNESS;
-    float brightness = ((float)led_brightness / MAX_BTNESS) * ((float)led_phy_btness / MAX_BTNESS) * progress;
+    if (spx == NULL) return;
 
-    if (color == LED_COLOR_OFF) {
-        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-            spx[i].index = i;
-            spx[i].rgb = 0;
-        }
-        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
-        return;
-    }
-
-    if (color == LED_COLOR_YELLOW) {
-        uint32_t now = board_millis();
-        int head = (now / 75) % NEOPIXEL_COUNT;
-        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-            int dist = (head - i + NEOPIXEL_COUNT) % NEOPIXEL_COUNT;
-            float b = 0.0f;
-            if (dist == 0) b = 1.0f;
-            else if (dist == 1) b = 0.45f;
-            else if (dist == 2) b = 0.15f;
-            else if (dist == 3) b = 0.04f;
-
-            uint8_t r = (uint8_t)(255 * b);
-            uint8_t g = (uint8_t)(160 * b);
-            uint8_t bl = 0;
-            spx[i].index = i;
-            spx[i].rgb = neopixel_rgb_ordered(r, g, bl);
-        }
-        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
-        return;
-    }
-
+    // 1. Confirmed / Verification blink: Bright solid green on all LEDs!
     if (color == LED_COLOR_GREEN) {
         for (int i = 0; i < NEOPIXEL_COUNT; i++) {
             spx[i].index = i;
             spx[i].rgb = neopixel_rgb_ordered(0, 255, 0);
         }
-        neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
+        neopixel_show();
         return;
     }
 
-    uint32_t pixel_color = pixel[color].rgb;
-    uint8_t r = (pixel_color >> 16) & 0xFF;
-    uint8_t g = (pixel_color >> 8) & 0xFF;
-    uint8_t b = (pixel_color) & 0xFF;
+    uint32_t mode = led_get_mode();
 
-    r = (uint8_t)(r * brightness);
-    g = (uint8_t)(g * brightness);
-    b = (uint8_t)(b * brightness);
-    uint32_t ordered = neopixel_rgb_ordered(r, g, b);
+    // 2. Waiting for confirmation (MODE_BUTTON): SPINNING COMET AROUND THE DIAL!
+    if (mode == MODE_BUTTON) {
+        uint32_t now = board_millis();
+        int head = (now / 70) % NEOPIXEL_COUNT; // Smooth rotating dial (~560ms per lap)
+        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+            int dist = (head - i + NEOPIXEL_COUNT) % NEOPIXEL_COUNT;
+            float b = 0.0f;
+            if (dist == 0) b = 1.0f;
+            else if (dist == 1) b = 0.5f;
+            else if (dist == 2) b = 0.2f;
+            else if (dist == 3) b = 0.04f;
 
+            uint8_t r = (uint8_t)(255 * b);
+            uint8_t g = (uint8_t)(140 * b);
+            uint8_t bl = 0;
+            spx[i].index = i;
+            spx[i].rgb = neopixel_rgb_ordered(r, g, bl);
+        }
+        neopixel_show();
+        return;
+    }
+
+    // 3. Idle mode / USB Mounted / Off: KEEP ALL LEDS OFF (clean & calm)
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
         spx[i].index = i;
-        spx[i].rgb = ordered;
+        spx[i].rgb = 0;
     }
-    neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
+    neopixel_show();
 }
 
 led_driver_t led_driver_neopixel = {
@@ -639,8 +507,10 @@ def patch_cmake():
 
 if __name__ == "__main__":
     print("Starting LILYGO T-Embed patch...")
+    copy_images()
     create_display_files()
     patch_main_c()
+    patch_button_c()
     patch_led_c()
     patch_led_neopixel()
     patch_cmake()
