@@ -288,7 +288,6 @@ static void st7789_hw_init(void) {
     };
     spi_bus_add_device(SPI2_HOST, &devcfg, &spi_lcd);
 
-    // Initialization Sequence for ST7789
     lcd_cmd(0x01);
     vTaskDelay(pdMS_TO_TICKS(150));
 
@@ -467,10 +466,7 @@ def patch_led_c():
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    content = content.replace(
-        "#if defined(CONFIG_IDF_TARGET_ESP32S3)\\n        #define NEOPIXEL_PIN GPIO_NUM_48",
-        "#if defined(CONFIG_IDF_TARGET_ESP32S3)\\n        #define NEOPIXEL_PIN GPIO_NUM_14"
-    )
+    content = content.replace("GPIO_NUM_48", "GPIO_NUM_14")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -631,31 +627,23 @@ led_driver_t led_driver_neopixel = {
     print("Patched led_neopixel.c")
 
 def patch_cmake():
-    p1 = os.path.join(SDK_DIR, "picokeys_sdk_import.cmake")
-    if os.path.exists(p1):
-        with open(p1, "r", encoding="utf-8") as f:
+    p = os.path.join(SDK_DIR, "config", "esp32", "components", "pico-keys-sdk", "CMakeLists.txt")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
             c = f.read()
         if "tembed_display.c" not in c:
             c = c.replace(
-                "${CMAKE_CURRENT_LIST_DIR}/src/led/led_pico.c\\n    )",
-                "${CMAKE_CURRENT_LIST_DIR}/src/led/led_pico.c\\n        ${CMAKE_CURRENT_LIST_DIR}/src/tembed_display.c\\n    )"
+                "SRCS ${PICOKEYS_SOURCES}",
+                "SRCS ${PICOKEYS_SOURCES} ${PICOKEYS_SDK_DIR}/src/tembed_display.c"
             )
-            with open(p1, "w", encoding="utf-8") as f:
-                f.write(c)
-            print("Patched picokeys_sdk_import.cmake")
-
-    p2 = os.path.join(SDK_DIR, "config", "esp32", "components", "pico-keys-sdk", "CMakeLists.txt")
-    if os.path.exists(p2):
-        with open(p2, "r", encoding="utf-8") as f:
-            c = f.read()
-        if "driver\\n)" not in c:
+        if "driver" not in c:
             c = c.replace(
-                "    mbedtls\\n)",
-                "    mbedtls\\n    driver\\n)"
+                "mbedtls",
+                "mbedtls\\n    driver"
             )
-            with open(p2, "w", encoding="utf-8") as f:
-                f.write(c)
-            print("Patched component CMakeLists.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(c)
+        print("Patched component CMakeLists.txt")
 
 if __name__ == "__main__":
     print("Starting LILYGO T-Embed patch...")
