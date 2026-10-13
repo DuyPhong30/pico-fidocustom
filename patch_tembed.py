@@ -544,6 +544,19 @@ led_driver_t led_driver_neopixel = {
         f.write(custom_code)
     print("Patched led_neopixel.c")
 
+def patch_partitions():
+    path = os.path.join(SDK_DIR, "config", "esp32", "partitions.csv")
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Increase factory partition from 1M to 1800K (fits Kamen Rider UI)
+    content = content.replace("factory,  app,  factory,  0x20000, 1M", "factory,  app,  factory,  0x20000, 1800K")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("Patched partitions.csv to 1800K")
+
 def patch_cmake():
     p = os.path.join(SDK_DIR, "picokeys_sdk_import.cmake")
     if os.path.exists(p):
@@ -564,5 +577,6 @@ if __name__ == "__main__":
     patch_led_c()
     patch_led_h()
     patch_led_neopixel()
+    patch_partitions()
     patch_cmake()
     print("All patches successfully applied.")
