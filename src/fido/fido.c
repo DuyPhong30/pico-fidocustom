@@ -536,21 +536,117 @@ int wait_button_pressed(void) {
     return wait_button_pressed_timeout(button_timeout_seconds());
 }
 
+#ifdef ESP_PLATFORM
+#include "driver/gpio.h"
+#include "signal.h"
+#include "pico_time.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+extern bool req_button_pending;
+#endif
+
 int wait_button_pressed_timeout(uint32_t timeout_seconds) {
-    if (timeout_seconds != 0 || force_button_wait) {
-        uint8_t operation = current_fido_operation;
-        event_field_t fields[2];
-        size_t fields_len = 0;
-        if (current_fido_operation != OP_NONE) {
-            fields[fields_len++] = (event_field_t){ TLV_OPERATION, CONST_BYTE_ARRAY(&operation, sizeof(operation)) };
-        }
-        if (rp_id != NULL && rp_id_len > 0) {
-            fields[fields_len++] = (event_field_t){ TLV_RPID, CONST_BYTE_ARRAY((const uint8_t *)rp_id, rp_id_len) };
-        }
-        event_send(OP_USER_PRESENCE, RC_NONE, fields, fields_len);
+    if (timeout_seconds == 0) {
+        timeout_seconds = 30;
     }
+    uint8_t operation = current_fido_operation;
+    event_field_t fields[2];
+    size_t fields_len = 0;
+    if (current_fido_operation != OP_NONE) {
+        fields[fields_len++] = (event_field_t){ TLV_OPERATION, CONST_BYTE_ARRAY(&operation, sizeof(operation)) };
+    }
+    if (rp_id != NULL && rp_id_len > 0) {
+        fields[fields_len++] = (event_field_t){ TLV_RPID, CONST_BYTE_ARRAY((const uint8_t *)rp_id, rp_id_len) };
+    }
+    event_send(OP_USER_PRESENCE, RC_NONE, fields, fields_len);
+
+#ifdef ESP_PLATFORM
+    req_button_pending = true;
+
+    // Immediately trigger UI (Kamen Rider W screen, rotating amber WS2812 comet, "Standing By" audio)
+    signal_user_presence_request_data_t data = {
+        .timeout = timeout_seconds,
+    };
+    signal_emit_param(SIGNAL_USER_PRESENCE_REQUEST, &data);
+
+    // Configure GPIO 0 with internal pullup
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
+
+    cancel_button = false;
+    uint32_t start_ms = board_millis();
+    uint32_t deadline = start_ms + (timeout_seconds * 1000);
+
+    // Step 1: Wait until button is observed in RELEASED (HIGH == 1) state for >= 50ms before arming
+    uint32_t unpressed_start = 0;
+    while (board_millis() < deadline && !cancel_button) {
+        if (gpio_get_level(GPIO_NUM_0) == 1) {
+            if (unpressed_start == 0) {
+                unpressed_start = board_millis();
+            } else if (board_millis() - unpressed_start >= 50) {
+                break; // Confirmed released & armed!
+            }
+        } else {
+            unpressed_start = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Step 2: Strictly wait for physical click of the knob (LOW == 0)
+    // Debounced: must stay LOW for >= 40ms (real human click)
+    uint32_t press_start = 0;
+    bool clicked = false;
+
+    while (board_millis() < deadline) {
+        if (cancel_button) {
+            break;
+        }
+
+        int level = gpio_get_level(GPIO_NUM_0);
+        uint32_t now = board_millis();
+
+        if (level == 0) {
+            if (press_start == 0) {
+                press_start = now;
+            } else if (now - press_start >= 40) {
+                // Genuine click confirmed!
+                // Wait until knob is released or held for up to 350ms
+                while (gpio_get_level(GPIO_NUM_0) == 0 && (board_millis() - press_start < 350)) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+                clicked = true;
+                break;
+            }
+        } else {
+            press_start = 0;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    req_button_pending = false;
+
+    if (cancel_button) {
+        signal_emit(SIGNAL_USER_PRESENCE_CANCELLED);
+        return 2;
+    }
+    if (clicked) {
+        signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
+        return 0; // Success!
+    }
+
+    // 30s timeout! Screen shows OOO, LED turns solid red 2s, error sound
+    signal_emit(SIGNAL_USER_PRESENCE_TIMEOUT);
+    return 1; // Timeout!
+#else
     uint32_t val = EV_PRESS_BUTTON_WITH_TIMEOUT(timeout_seconds);
-#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+#if defined(PICO_PLATFORM)
     queue_try_add(&card_to_usb_q, &val);
     do {
         queue_remove_blocking(&usb_to_card_q, &val);
@@ -563,6 +659,7 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
         return 2;
     }
     return 0;
+#endif
 }
 
 uint32_t user_present_time_limit = 0;

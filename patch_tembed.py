@@ -295,9 +295,10 @@ TEMBED_AUDIO_C = """#include "tembed_audio.h"
 #include "esp_idf_version.h"
 #include "signal.h"
 
-#define I2S_BCLK_PIN GPIO_NUM_46
-#define I2S_WS_PIN   GPIO_NUM_40
-#define I2S_DOUT_PIN GPIO_NUM_7
+#define I2S_BCLK_PIN GPIO_NUM_40
+#define I2S_WS_PIN   GPIO_NUM_7
+#define I2S_DOUT_PIN GPIO_NUM_6
+#define I2S_SD_PIN   GPIO_NUM_46
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "driver/i2s_std.h"
@@ -309,6 +310,11 @@ static i2s_chan_handle_t tx_chan = NULL;
 static QueueHandle_t audio_queue = NULL;
 
 static void tembed_i2s_init(void) {
+    // 1. Enable MAX98357A amplifier via SD_MODE (GPIO 46)
+    gpio_reset_pin(I2S_SD_PIN);
+    gpio_set_direction(I2S_SD_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(I2S_SD_PIN, 1);
+
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     i2s_new_channel(&chan_cfg, &tx_chan, NULL);
@@ -583,7 +589,12 @@ int app_main(void) {
     tembed_display_start();
 
     // 4. Start Kamen Rider Audio Task
-    tembed_audio_start();"""
+    tembed_audio_start();
+
+    // 5. Enable MAX98357A Audio Amplifier Shutdown Pin (GPIO 46)
+    gpio_reset_pin(GPIO_NUM_46);
+    gpio_set_direction(GPIO_NUM_46, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_46, 1);"""
         content = content.replace(target, replacement, 1)
 
     # Ensure pullup is maintained even when BOOT_PIN is initialized
@@ -614,7 +625,7 @@ TEMBED_BUTTON_C = '''/*
 
 int (*button_pressed_cb)(uint8_t) = NULL;
 
-static bool req_button_pending = false;
+bool req_button_pending = false;
 static bool async_button_wait = false;
 static uint32_t async_button_started = 0;
 static uint32_t async_button_timeout = 0;
