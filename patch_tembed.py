@@ -260,12 +260,265 @@ void tembed_display_start(void) {
 }
 """
 
+TEMBED_AUDIO_H = """/*
+ * LILYGO T-Embed Audio Driver for FIDO2 Security Key
+ * Chip: MAX98357A I2S Class-D DAC/Amp
+ * Pins: BCLK = GPIO 46, LRCLK/WS = GPIO 40, DOUT = GPIO 7
+ */
+
+#ifndef _TEMBED_AUDIO_H_
+#define _TEMBED_AUDIO_H_
+
+#include <stdint.h>
+
+typedef enum {
+    TEMBED_SOUND_NONE = 0,
+    TEMBED_SOUND_WAITING,   // Faiz "Standing By"
+    TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!"
+    TEMBED_SOUND_TIMEOUT,   // Buzzer Error
+    TEMBED_SOUND_STOP
+} tembed_sound_t;
+
+void tembed_audio_start(void);
+void tembed_audio_play(tembed_sound_t sound);
+
+#endif // _TEMBED_AUDIO_H_
+"""
+
+TEMBED_AUDIO_C = """#include "tembed_audio.h"
+#include "tembed_audio_data.h"
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "driver/gpio.h"
+#include "esp_idf_version.h"
+#include "signal.h"
+
+#define I2S_BCLK_PIN GPIO_NUM_46
+#define I2S_WS_PIN   GPIO_NUM_40
+#define I2S_DOUT_PIN GPIO_NUM_7
+
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#include "driver/i2s_std.h"
+static i2s_chan_handle_t tx_chan = NULL;
+#else
+#include "driver/i2s.h"
+#endif
+
+static QueueHandle_t audio_queue = NULL;
+
+static void tembed_i2s_init(void) {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_new_channel(&chan_cfg, &tx_chan, NULL);
+
+    i2s_std_config_t std_cfg = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_GPIO_UNUSED,
+            .bclk = I2S_BCLK_PIN,
+            .ws   = I2S_WS_PIN,
+            .dout = I2S_DOUT_PIN,
+            .din  = I2S_GPIO_UNUSED,
+            .invert_flags = {
+                .mclk_inv = false,
+                .bclk_inv = false,
+                .ws_inv   = false,
+            },
+        },
+    };
+    i2s_channel_init_std_mode(tx_chan, &std_cfg);
+    i2s_channel_enable(tx_chan);
+#else
+    i2s_config_t i2s_config = {
+        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+        .sample_rate = 16000,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 6,
+        .dma_buf_len = 256,
+        .use_apll = false,
+        .tx_desc_auto_clear = true
+    };
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCLK_PIN,
+        .ws_io_num = I2S_WS_PIN,
+        .data_out_num = I2S_DOUT_PIN,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    i2s_set_pin(I2S_NUM_0, &pin_config);
+    i2s_zero_dma_buffer(I2S_NUM_0);
+#endif
+}
+
+static void tembed_i2s_write(const void *src, size_t size) {
+    size_t written = 0;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    if (tx_chan) {
+        i2s_channel_write(tx_chan, src, size, &written, portMAX_DELAY);
+    }
+#else
+    i2s_write(I2S_NUM_0, src, size, &written, portMAX_DELAY);
+#endif
+}
+
+static void tembed_i2s_silence(size_t samples) {
+    static int16_t zero_buf[128 * 2] = {0};
+    size_t remaining = samples;
+    while (remaining > 0) {
+        size_t chunk = remaining > 128 ? 128 : remaining;
+        tembed_i2s_write(zero_buf, chunk * 2 * sizeof(int16_t));
+        remaining -= chunk;
+    }
+}
+
+static void tembed_audio_task(void *pvParameters) {
+    (void)pvParameters;
+    tembed_i2s_init();
+
+    tembed_sound_t cur_sound = TEMBED_SOUND_NONE;
+    int16_t stereo_buf[128 * 2];
+
+    while (1) {
+        tembed_sound_t req;
+        if (xQueueReceive(audio_queue, &req, portMAX_DELAY)) {
+            cur_sound = req;
+        }
+
+        if (cur_sound == TEMBED_SOUND_NONE || cur_sound == TEMBED_SOUND_STOP) {
+            continue;
+        }
+
+        const uint8_t *pcm_u8 = NULL;
+        size_t total_samples = 0;
+        bool loop = false;
+
+        switch (cur_sound) {
+            case TEMBED_SOUND_WAITING:
+                pcm_u8 = sound_waiting_pcm;
+                total_samples = sound_waiting_samples;
+                loop = true;
+                break;
+            case TEMBED_SOUND_CONFIRMED:
+                pcm_u8 = sound_confirmed_pcm;
+                total_samples = sound_confirmed_samples;
+                loop = false;
+                break;
+            case TEMBED_SOUND_TIMEOUT:
+                pcm_u8 = sound_timeout_pcm;
+                total_samples = sound_timeout_samples;
+                loop = false;
+                break;
+            default:
+                break;
+        }
+
+        if (!pcm_u8 || total_samples == 0) {
+            cur_sound = TEMBED_SOUND_NONE;
+            continue;
+        }
+
+        size_t pos = 0;
+        while (pos < total_samples && cur_sound != TEMBED_SOUND_STOP && cur_sound != TEMBED_SOUND_NONE) {
+            if (xQueueReceive(audio_queue, &req, 0)) {
+                cur_sound = req;
+                break;
+            }
+
+            size_t chunk = 128;
+            if (pos + chunk > total_samples) {
+                chunk = total_samples - pos;
+            }
+
+            for (size_t i = 0; i < chunk; i++) {
+                int16_t s16 = ((int16_t)pcm_u8[pos + i] - 128) << 8;
+                s16 = (int16_t)((int32_t)s16 * 7 / 10);
+                stereo_buf[i * 2]     = s16;
+                stereo_buf[i * 2 + 1] = s16;
+            }
+
+            tembed_i2s_write(stereo_buf, chunk * 2 * sizeof(int16_t));
+            pos += chunk;
+
+            if (pos >= total_samples && loop) {
+                pos = 0;
+                tembed_i2s_silence(256);
+                for (int d = 0; d < 8; d++) {
+                    if (xQueueReceive(audio_queue, &req, pdMS_TO_TICKS(100))) {
+                        cur_sound = req;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!loop || cur_sound != TEMBED_SOUND_WAITING) {
+            cur_sound = TEMBED_SOUND_NONE;
+            tembed_i2s_silence(128);
+        }
+    }
+}
+
+void tembed_audio_play(tembed_sound_t sound) {
+    if (audio_queue) {
+        xQueueSend(audio_queue, &sound, 0);
+    }
+}
+
+static int tembed_audio_signal_cb(signal_code_t code, void *data) {
+    (void)data;
+    switch (code) {
+        case SIGNAL_USER_PRESENCE_REQUEST:
+            tembed_audio_play(TEMBED_SOUND_WAITING);
+            break;
+        case SIGNAL_USER_PRESENCE_COMPLETED:
+            tembed_audio_play(TEMBED_SOUND_CONFIRMED);
+            break;
+        case SIGNAL_USER_PRESENCE_TIMEOUT:
+            tembed_audio_play(TEMBED_SOUND_TIMEOUT);
+            break;
+        case SIGNAL_USER_PRESENCE_CANCELLED:
+        case SIGNAL_BOOT:
+        case SIGNAL_USB_MOUNTED:
+            tembed_audio_play(TEMBED_SOUND_STOP);
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+void tembed_audio_start(void) {
+    audio_queue = xQueueCreate(8, sizeof(tembed_sound_t));
+    xTaskCreate(tembed_audio_task, "tembed_audio", 3072, NULL, 2, NULL);
+
+    signal_add(SIGNAL_USER_PRESENCE_REQUEST, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_USER_PRESENCE_CANCELLED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+}
+"""
+
 def copy_images():
     src = os.path.join(ROOT, "tembed_images.h")
     dst = os.path.join(SDK_DIR, "src", "tembed_images.h")
     if os.path.exists(src):
         shutil.copy(src, dst)
         print("Copied tembed_images.h to SDK")
+
+def copy_audio():
+    src = os.path.join(ROOT, "tembed_audio_data.h")
+    dst = os.path.join(SDK_DIR, "src", "tembed_audio_data.h")
+    if os.path.exists(src):
+        shutil.copy(src, dst)
+        print("Copied tembed_audio_data.h to SDK")
 
 def create_display_files():
     src_dir = os.path.join(SDK_DIR, "src")
@@ -276,6 +529,15 @@ def create_display_files():
         f.write(TEMBED_DISPLAY_C)
     print("Created tembed_display.h and tembed_display.c")
 
+def create_audio_files():
+    src_dir = os.path.join(SDK_DIR, "src")
+    os.makedirs(src_dir, exist_ok=True)
+    with open(os.path.join(src_dir, "tembed_audio.h"), "w", encoding="utf-8") as f:
+        f.write(TEMBED_AUDIO_H)
+    with open(os.path.join(src_dir, "tembed_audio.c"), "w", encoding="utf-8") as f:
+        f.write(TEMBED_AUDIO_C)
+    print("Created tembed_audio.h and tembed_audio.c")
+
 def patch_main_c():
     path = os.path.join(SDK_DIR, "src", "main.c")
     if not os.path.exists(path):
@@ -283,12 +545,23 @@ def patch_main_c():
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if "tembed_display_start" in content:
-        print("main.c already patched.")
+    if "tembed_audio_start" in content:
+        print("main.c already patched with audio.")
         return
 
-    target = "int app_main(void) {"
-    replacement = """#include "tembed_display.h"
+    if "tembed_display_start();" in content:
+        content = content.replace(
+            '#include "tembed_display.h"',
+            '#include "tembed_display.h"\n#include "tembed_audio.h"'
+        )
+        content = content.replace(
+            'tembed_display_start();',
+            'tembed_display_start();\n    tembed_audio_start();'
+        )
+    else:
+        target = "int app_main(void) {"
+        replacement = """#include "tembed_display.h"
+#include "tembed_audio.h"
 #include "driver/gpio.h"
 int app_main(void) {
     // 1. Enable Lilygo T-Embed Power Gate (GPIO 15) & Backlight (GPIO 21)
@@ -307,14 +580,17 @@ int app_main(void) {
     gpio_pulldown_dis(GPIO_NUM_0);
 
     // 3. Start LCD UI Task
-    tembed_display_start();"""
-    content = content.replace(target, replacement, 1)
+    tembed_display_start();
 
-    # Ensure pullup is maintained even when BOOT_PIN is initialized
-    content = content.replace(
-        "gpio_pulldown_dis(BOOT_PIN);",
-        "gpio_pulldown_dis(BOOT_PIN);\n    gpio_pullup_en(BOOT_PIN);"
-    )
+    // 4. Start Kamen Rider Audio Task
+    tembed_audio_start();"""
+        content = content.replace(target, replacement, 1)
+
+        # Ensure pullup is maintained even when BOOT_PIN is initialized
+        content = content.replace(
+            "gpio_pulldown_dis(BOOT_PIN);",
+            "gpio_pulldown_dis(BOOT_PIN);\n    gpio_pullup_en(BOOT_PIN);"
+        )
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -564,14 +840,18 @@ def patch_cmake():
             c = f.read()
         if "tembed_display.c" not in c:
             c += "\nlist(APPEND PICOKEYS_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/tembed_display.c)\n"
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(c)
-            print("Appended tembed_display.c to PICOKEYS_SOURCES")
+        if "tembed_audio.c" not in c:
+            c += "\nlist(APPEND PICOKEYS_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/tembed_audio.c)\n"
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(c)
+        print("Appended tembed_display.c and tembed_audio.c to PICOKEYS_SOURCES")
 
 if __name__ == "__main__":
     print("Starting LILYGO T-Embed patch...")
     copy_images()
+    copy_audio()
     create_display_files()
+    create_audio_files()
     patch_main_c()
     patch_button_c()
     patch_led_c()
