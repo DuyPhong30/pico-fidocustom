@@ -263,7 +263,7 @@ void tembed_display_start(void) {
 TEMBED_AUDIO_H = """/*
  * LILYGO T-Embed Audio Driver for FIDO2 Security Key
  * Chip: MAX98357A I2S Class-D DAC/Amp
- * Pins: BCLK = GPIO 46, LRCLK/WS = GPIO 40, DOUT = GPIO 7
+ * Pins: BCLK = GPIO 7, LRCLK/WS = GPIO 5, DOUT = GPIO 6, POWER_ON = GPIO 46
  */
 
 #ifndef _TEMBED_AUDIO_H_
@@ -295,10 +295,10 @@ TEMBED_AUDIO_C = """#include "tembed_audio.h"
 #include "esp_idf_version.h"
 #include "signal.h"
 
-#define I2S_BCLK_PIN GPIO_NUM_40
-#define I2S_WS_PIN   GPIO_NUM_7
+#define I2S_BCLK_PIN GPIO_NUM_7
+#define I2S_WS_PIN   GPIO_NUM_5
 #define I2S_DOUT_PIN GPIO_NUM_6
-#define I2S_SD_PIN   GPIO_NUM_46
+#define I2S_PWR_PIN  GPIO_NUM_46
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "driver/i2s_std.h"
@@ -310,13 +310,13 @@ static i2s_chan_handle_t tx_chan = NULL;
 static QueueHandle_t audio_queue = NULL;
 
 static void tembed_i2s_init(void) {
-    // 1. Enable MAX98357A amplifier via SD_MODE (GPIO 46)
-    gpio_reset_pin(I2S_SD_PIN);
-    gpio_set_direction(I2S_SD_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(I2S_SD_PIN, 1);
+    // 1. Ensure MAX98357A & Board Peripheral Power Rail is active (GPIO 46)
+    gpio_set_direction(I2S_PWR_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(I2S_PWR_PIN, 1);
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan_cfg.auto_clear = true;
     i2s_new_channel(&chan_cfg, &tx_chan, NULL);
 
     i2s_std_config_t std_cfg = {
@@ -443,7 +443,6 @@ static void tembed_audio_task(void *pvParameters) {
 
             for (size_t i = 0; i < chunk; i++) {
                 int16_t s16 = ((int16_t)pcm_u8[pos + i] - 128) << 8;
-                s16 = (int16_t)((int32_t)s16 * 7 / 10);
                 stereo_buf[i * 2]     = s16;
                 stereo_buf[i * 2 + 1] = s16;
             }
@@ -501,7 +500,7 @@ static int tembed_audio_signal_cb(signal_code_t code, void *data) {
 
 void tembed_audio_start(void) {
     audio_queue = xQueueCreate(8, sizeof(tembed_sound_t));
-    xTaskCreate(tembed_audio_task, "tembed_audio", 3072, NULL, 2, NULL);
+    xTaskCreate(tembed_audio_task, "tembed_audio", 4096, NULL, 2, NULL);
 
     signal_add(SIGNAL_USER_PRESENCE_REQUEST, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
