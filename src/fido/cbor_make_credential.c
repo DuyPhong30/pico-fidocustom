@@ -532,7 +532,7 @@ int cbor_make_credential(const uint8_t *data, size_t len) {
         CBOR_ERROR(CTAP2_ERR_INVALID_OPTION);
     }
 
-    if (options.up == ptrue || options.up == NULL) { //14.1
+    if (options.present == false || options.up == ptrue || options.up == NULL) { //14.1
         if (pinUvAuthParam.present == true) {
             if (getUserPresentFlagValue() == false) {
                 if (check_user_presence() == false) {

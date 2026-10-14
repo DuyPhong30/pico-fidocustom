@@ -586,65 +586,257 @@ int app_main(void) {
     tembed_audio_start();"""
         content = content.replace(target, replacement, 1)
 
-        # Ensure pullup is maintained even when BOOT_PIN is initialized
-        content = content.replace(
-            "gpio_pulldown_dis(BOOT_PIN);",
-            "gpio_pulldown_dis(BOOT_PIN);\n    gpio_pullup_en(BOOT_PIN);"
-        )
+    # Ensure pullup is maintained even when BOOT_PIN is initialized
+    content = content.replace(
+        "gpio_pulldown_dis(BOOT_PIN);",
+        "gpio_pulldown_dis(BOOT_PIN);\n    gpio_pullup_en(BOOT_PIN);"
+    )
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     print("Patched main.c")
 
+TEMBED_BUTTON_C = '''/*
+ * Customized button driver for LILYGO T-Embed (ESP32-S3)
+ * Enforces strict physical rotary knob press with hardware pull-up & multi-sample debouncing
+ */
+
+#include "picokeys.h"
+#include "button.h"
+#include "led/led.h"
+#include "pico_time.h"
+#include "signal.h"
+#include "usb.h"
+
+#ifdef ESP_PLATFORM
+#include "driver/gpio.h"
+#endif
+
+int (*button_pressed_cb)(uint8_t) = NULL;
+
+static bool req_button_pending = false;
+static bool async_button_wait = false;
+static uint32_t async_button_started = 0;
+static uint32_t async_button_timeout = 0;
+static uint32_t async_button_led_mode = MODE_MOUNTED;
+
+bool is_req_button_pending(void) {
+    return req_button_pending;
+}
+
+volatile bool cancel_button = false;
+bool touch_accept_button = false;
+volatile bool force_button_wait = true;
+
+typedef enum {
+    BTN_STAGE_WAIT_RELEASE = 0, // Must observe stable released (HIGH) state first
+    BTN_STAGE_WAIT_PRESS,       // Armed and waiting for physical click
+    BTN_STAGE_DEBOUNCE_PRESS,   // Click detected, verifying sustained press (> 40ms)
+    BTN_STAGE_CONFIRMED,        // Confirmed genuine press! Complete on release or hold
+} tembed_btn_stage_t;
+
+static volatile tembed_btn_stage_t btn_stage = BTN_STAGE_WAIT_RELEASE;
+static volatile uint32_t btn_stage_timer = 0;
+static volatile uint32_t btn_press_start = 0;
+
+static void tembed_button_hw_init(void) {
+#ifdef ESP_PLATFORM
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
+#endif
+}
+
+static inline bool picok_board_button_read(void) {
+#ifdef ESP_PLATFORM
+    // 0 = pressed (LOW when knob clicked down), 1 = unpressed (HIGH with pullup)
+    return (gpio_get_level(GPIO_NUM_0) == 0);
+#else
+    return false;
+#endif
+}
+
+static uint32_t button_last_poll = 0;
+volatile uint32_t button_pressed_duration = 0;
+static bool button_pressed_state = false;
+static uint32_t button_pressed_time = 0;
+static uint8_t button_press = 0;
+static bool button_hold_state = false;
+static uint32_t button_hold_started = 0;
+
+void button_wait_start(void) {
+    button_wait_start_timeout(30);
+}
+
+void button_wait_start_timeout(uint32_t timeout_seconds) {
+    if (timeout_seconds == 0) {
+        timeout_seconds = 30;
+    }
+    force_button_wait = true;
+    uint32_t button_timeout = timeout_seconds * 1000;
+
+    tembed_button_hw_init();
+
+    signal_user_presence_request_data_t data = {
+        .timeout = button_timeout / 1000,
+    };
+    signal_emit_param(SIGNAL_USER_PRESENCE_REQUEST, &data);
+
+    cancel_button = false;
+    async_button_wait = true;
+    async_button_started = board_millis();
+    async_button_timeout = button_timeout;
+    async_button_led_mode = led_get_mode();
+    req_button_pending = true;
+    led_set_mode(MODE_BUTTON);
+
+    btn_stage = BTN_STAGE_WAIT_RELEASE;
+    btn_stage_timer = 0;
+    btn_press_start = 0;
+}
+
+void button_wait_poll(void) {
+    if (!async_button_wait) {
+        return;
+    }
+
+    uint32_t now = board_millis();
+    bool pressed = picok_board_button_read();
+    button_event_t result = BUTTON_EV_NONE;
+
+    if (cancel_button) {
+        result = BUTTON_EV_CANCELLED;
+    }
+    else if (async_button_started + async_button_timeout < now) {
+        result = BUTTON_EV_TIMEOUT;
+    }
+    else {
+        switch (btn_stage) {
+            case BTN_STAGE_WAIT_RELEASE:
+                // Require the button to be observed in unpressed (HIGH) state for at least 50ms before arming
+                if (!pressed) {
+                    if (btn_stage_timer == 0) {
+                        btn_stage_timer = now;
+                    } else if (now - btn_stage_timer >= 50) {
+                        btn_stage = BTN_STAGE_WAIT_PRESS;
+                        btn_stage_timer = 0;
+                    }
+                } else {
+                    btn_stage_timer = 0;
+                }
+                break;
+
+            case BTN_STAGE_WAIT_PRESS:
+                // Armed and waiting for physical click of the knob!
+                if (pressed) {
+                    btn_stage = BTN_STAGE_DEBOUNCE_PRESS;
+                    btn_press_start = now;
+                }
+                break;
+
+            case BTN_STAGE_DEBOUNCE_PRESS:
+                // Debounce: Verify the press stays LOW for at least 40ms (real human click)
+                if (pressed) {
+                    if (now - btn_press_start >= 40) {
+                        btn_stage = BTN_STAGE_CONFIRMED;
+                    }
+                } else {
+                    // Transient glitch (< 40ms), reject and return to waiting
+                    btn_stage = BTN_STAGE_WAIT_PRESS;
+                }
+                break;
+
+            case BTN_STAGE_CONFIRMED:
+                // Genuine human click confirmed! Complete on release or if held for >= 250ms
+                if (!pressed || (now - btn_press_start >= 250)) {
+                    result = BUTTON_EV_PRESSED;
+                }
+                break;
+        }
+    }
+
+    if (result == BUTTON_EV_NONE) {
+        return;
+    }
+
+    async_button_wait = false;
+    req_button_pending = false;
+    led_set_mode(async_button_led_mode);
+
+    uint32_t flag = 0;
+    if (result == BUTTON_EV_PRESSED) {
+        flag = EV_BUTTON_PRESSED;
+        signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
+    }
+    else if (result == BUTTON_EV_TIMEOUT) {
+        flag = EV_BUTTON_TIMEOUT;
+        signal_emit(SIGNAL_USER_PRESENCE_TIMEOUT);
+    }
+    else {
+        flag = EV_BUTTON_CANCELLED;
+        signal_emit(SIGNAL_USER_PRESENCE_CANCELLED);
+    }
+    queue_try_add(&usb_to_card_q, &flag);
+}
+
+uint32_t button_timeout_seconds(void) {
+    return 30;
+}
+
+void button_task(void) {
+    uint32_t now = board_millis();
+    if (now > 1000 && now - button_last_poll >= 10 && (async_button_wait || !is_busy())) {
+        button_last_poll = now;
+        if (async_button_wait) {
+            button_wait_poll();
+            return;
+        }
+        bool current_button_state = picok_board_button_read();
+        if (current_button_state && !button_hold_state) {
+            button_hold_started = now;
+            button_pressed_duration = 0;
+        }
+        else if (!current_button_state && button_hold_state) {
+            button_pressed_duration = button_hold_started == 0 ? 0 : now - button_hold_started;
+            button_hold_started = 0;
+        }
+        else if (current_button_state && button_hold_state && button_hold_started != 0) {
+            button_pressed_duration = now - button_hold_started;
+        }
+        button_hold_state = current_button_state;
+        if (button_pressed_cb) {
+            if (current_button_state != button_pressed_state) {
+                if (current_button_state == false) {
+                    if (button_pressed_time == 0 || button_pressed_time + 1000 > now) {
+                        button_press++;
+                    }
+                    button_pressed_time = now;
+                }
+                button_pressed_state = current_button_state;
+            }
+            if (button_pressed_time > 0 && button_press > 0 && button_pressed_time + 1000 < now && button_pressed_state == false) {
+                if (button_pressed_cb != NULL) {
+                    (*button_pressed_cb)(button_press);
+                }
+                button_pressed_time = button_press = 0;
+            }
+        }
+    }
+}
+'''
+
 def patch_button_c():
     path = os.path.join(SDK_DIR, "src", "button.c")
     if not os.path.exists(path):
         return
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    # 1. Force button timeout to 30s
-    content = content.replace(
-        "return phy_data.up_btn_present ? phy_data.up_btn : 0;",
-        "return 30;"
-    )
-
-    # 2. In button_wait_start_timeout, force 30s wait and remove early return
-    target_start = """void button_wait_start_timeout(uint32_t timeout_seconds) {
-    uint32_t button_timeout = timeout_seconds * 1000;
-    if (button_timeout == 0 && !force_button_wait) {
-        signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
-        uint32_t flag = EV_BUTTON_PRESSED;
-        queue_try_add(&usb_to_card_q, &flag);
-        return;
-    }"""
-    replacement_start = """void button_wait_start_timeout(uint32_t timeout_seconds) {
-    if (timeout_seconds == 0) timeout_seconds = 30;
-    force_button_wait = true;
-    uint32_t button_timeout = timeout_seconds * 1000;"""
-    content = content.replace(target_start, replacement_start, 1)
-
-    # 3. Reset async_button_pressed to false initially
-    content = content.replace(
-        "async_button_pressed = picok_board_button_read();",
-        "async_button_pressed = false;"
-    )
-
-    # 4. In button_wait_poll, trigger on release or hold > 300ms
-    target_poll = """    else if (async_button_pressed && !pressed) {
-        result = BUTTON_EV_PRESSED;
-    }"""
-    replacement_poll = """    else if (async_button_pressed && !pressed) {
-        result = BUTTON_EV_PRESSED;
-    }
-    else if (async_button_pressed && (async_button_started + 300 < now) && pressed) {
-        result = BUTTON_EV_PRESSED;
-    }"""
-    content = content.replace(target_poll, replacement_poll, 1)
-
     with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    print("Patched button.c")
+        f.write(TEMBED_BUTTON_C)
+    print("Replaced button.c with robust T-Embed button driver")
 
 def patch_led_c():
     path = os.path.join(SDK_DIR, "src", "led", "led.c")
