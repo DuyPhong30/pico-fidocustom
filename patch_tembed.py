@@ -261,9 +261,9 @@ void tembed_display_start(void) {
 """
 
 TEMBED_AUDIO_H = """/*
- * LILYGO T-Embed Audio Driver for FIDO2 Security Key
+ * LILYGO T-Embed CC1101 Plus Audio Driver for FIDO2 Security Key
  * Chip: MAX98357A I2S Class-D DAC/Amp
- * Pins: BCLK = GPIO 7, LRCLK/WS = GPIO 5, DOUT = GPIO 6, POWER_ON = GPIO 46
+ * Pins: BCLK = GPIO 46, LRCLK/WS = GPIO 40, DOUT = GPIO 7, PWR_EN = GPIO 15
  */
 
 #ifndef _TEMBED_AUDIO_H_
@@ -273,7 +273,8 @@ TEMBED_AUDIO_H = """/*
 
 typedef enum {
     TEMBED_SOUND_NONE = 0,
-    TEMBED_SOUND_WAITING,   // Faiz "Standing By"
+    TEMBED_SOUND_BOOT,      // Startup chime (Faiz "Standing By" once)
+    TEMBED_SOUND_WAITING,   // Faiz "Standing By" loop
     TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!"
     TEMBED_SOUND_TIMEOUT,   // Buzzer Error
     TEMBED_SOUND_STOP
@@ -295,10 +296,10 @@ TEMBED_AUDIO_C = """#include "tembed_audio.h"
 #include "esp_idf_version.h"
 #include "signal.h"
 
-#define I2S_BCLK_PIN GPIO_NUM_7
-#define I2S_WS_PIN   GPIO_NUM_5
-#define I2S_DOUT_PIN GPIO_NUM_6
-#define I2S_PWR_PIN  GPIO_NUM_46
+// Official LILYGO T-Embed CC1101 Plus Audio Pinout
+#define I2S_BCLK_PIN GPIO_NUM_46
+#define I2S_WS_PIN   GPIO_NUM_40
+#define I2S_DOUT_PIN GPIO_NUM_7
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
 #include "driver/i2s_std.h"
@@ -310,9 +311,9 @@ static i2s_chan_handle_t tx_chan = NULL;
 static QueueHandle_t audio_queue = NULL;
 
 static void tembed_i2s_init(void) {
-    // 1. Ensure MAX98357A & Board Peripheral Power Rail is active (GPIO 46)
-    gpio_set_direction(I2S_PWR_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(I2S_PWR_PIN, 1);
+    // 1. Enable LilyGO T-Embed CC1101 Plus Board Power Gate (GPIO 15)
+    gpio_set_direction(GPIO_NUM_15, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_15, 1);
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
@@ -387,6 +388,10 @@ static void tembed_audio_task(void *pvParameters) {
     (void)pvParameters;
     tembed_i2s_init();
 
+    // Play startup chime once after 150ms so user immediately hears audio
+    vTaskDelay(pdMS_TO_TICKS(150));
+    tembed_audio_play(TEMBED_SOUND_BOOT);
+
     tembed_sound_t cur_sound = TEMBED_SOUND_NONE;
     int16_t stereo_buf[128 * 2];
 
@@ -405,6 +410,11 @@ static void tembed_audio_task(void *pvParameters) {
         bool loop = false;
 
         switch (cur_sound) {
+            case TEMBED_SOUND_BOOT:
+                pcm_u8 = sound_waiting_pcm;
+                total_samples = sound_waiting_samples;
+                loop = false;
+                break;
             case TEMBED_SOUND_WAITING:
                 pcm_u8 = sound_waiting_pcm;
                 total_samples = sound_waiting_samples;
@@ -488,8 +498,6 @@ static int tembed_audio_signal_cb(signal_code_t code, void *data) {
             tembed_audio_play(TEMBED_SOUND_TIMEOUT);
             break;
         case SIGNAL_USER_PRESENCE_CANCELLED:
-        case SIGNAL_BOOT:
-        case SIGNAL_USB_MOUNTED:
             tembed_audio_play(TEMBED_SOUND_STOP);
             break;
         default:
@@ -506,8 +514,6 @@ void tembed_audio_start(void) {
     signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_CANCELLED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
-    signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
-    signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
 }
 """
 
@@ -588,12 +594,7 @@ int app_main(void) {
     tembed_display_start();
 
     // 4. Start Kamen Rider Audio Task
-    tembed_audio_start();
-
-    // 5. Enable MAX98357A Audio Amplifier Shutdown Pin (GPIO 46)
-    gpio_reset_pin(GPIO_NUM_46);
-    gpio_set_direction(GPIO_NUM_46, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_NUM_46, 1);"""
+    tembed_audio_start();"""
         content = content.replace(target, replacement, 1)
 
     # Ensure pullup is maintained even when BOOT_PIN is initialized
