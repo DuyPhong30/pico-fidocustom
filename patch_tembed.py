@@ -333,12 +333,16 @@ static void tembed_render_hud(float progress, int remaining_sec, uint32_t frame)
     }
 
     // 4. Large Digital Countdown Clock: "[ 28s ]" (scale = 2)
-    char time_str[16];
-    if (remaining_sec >= 10) {
-        snprintf(time_str, sizeof(time_str), "[ %ds ]", remaining_sec);
-    } else {
-        snprintf(time_str, sizeof(time_str), "[  %ds ]", remaining_sec);
-    }
+    char time_str[8];
+    int sec = (remaining_sec < 0) ? 0 : ((remaining_sec > 99) ? 99 : remaining_sec);
+    time_str[0] = '[';
+    time_str[1] = ' ';
+    time_str[2] = (sec >= 10) ? ('0' + (sec / 10)) : ' ';
+    time_str[3] = '0' + (sec % 10);
+    time_str[4] = 's';
+    time_str[5] = ' ';
+    time_str[6] = ']';
+    time_str[7] = '\\0';
     int time_x = (HUD_W - (7 * 12)) / 2; // Centered at X=43
     uint16_t text_color = (remaining_sec <= 5) ? energy_color : 0xFFFF;
     hud_draw_string(time_x, HUD_Y_START + 14, time_str, text_color, 2);
