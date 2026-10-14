@@ -39,7 +39,7 @@ void tembed_display_set_state(tembed_ui_state_t state);
 
 TEMBED_DISPLAY_C = """#include "tembed_display.h"
 #include "tembed_images.h"
-#include "w_eye_data.h"
+#include "kamen_rider_eyes.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -73,7 +73,7 @@ static volatile uint32_t g_wait_start_tick = 0;
 static int s_last_beam_y = -1;
 
 static uint8_t hud_buf[HUD_W * HUD_H * 2];
-static uint8_t eye_buf[W_EYE_W * W_EYE_H * 2];
+static uint8_t eye_buf[64 * 46 * 2];
 
 static void lcd_cmd(uint8_t cmd) {
     gpio_set_level(TFT_DC, 0);
@@ -401,7 +401,143 @@ static void tembed_render_eyes(uint32_t frame) {
     }
 
     st7789_set_window(W_EYE_X, W_EYE_Y, W_EYE_X + W_EYE_W - 1, W_EYE_Y + W_EYE_H - 1);
-    lcd_data(eye_buf, sizeof(eye_buf));
+    lcd_data(eye_buf, W_EYE_W * W_EYE_H * 2);
+}
+
+static void tembed_render_fourze_idle(uint32_t frame) {
+    float phase = (float)frame * 0.12f;
+    float pulse = 0.70f + 0.30f * sinf(phase);
+
+    // 1. Fourze Orange Breathing Visor Eyes
+    for (int y = 0; y < FOURZE_EYE_H; y++) {
+        for (int x = 0; x < FOURZE_EYE_W; x++) {
+            int idx = y * FOURZE_EYE_W + x;
+            uint16_t c = fourze_eye_base[idx];
+            uint8_t r = (c >> 11) & 0x1F;
+            uint8_t g = (c >> 5) & 0x3F;
+            uint8_t b = c & 0x1F;
+
+            // Orange compound eye pixels: high red, mid green, low blue
+            if (r > 18 && g > 8 && g < 36 && b < 10) {
+                uint8_t r_new = (uint8_t)(r * pulse);
+                if (r_new > 31) r_new = 31;
+                if (r_new < 8) r_new = 8;
+
+                uint8_t g_new = (uint8_t)(g * pulse);
+                if (g_new > 45) g_new = 45;
+
+                // Center core flare when breathing reaches peak
+                if (pulse > 0.88f && r > 25 && g > 15) {
+                    r_new = 31;
+                    g_new = 55; // White-hot amber glow
+                }
+
+                uint16_t pix = (r_new << 11) | (g_new << 5) | b;
+                eye_buf[idx * 2]     = (pix >> 8) & 0xFF;
+                eye_buf[idx * 2 + 1] = pix & 0xFF;
+            } else {
+                eye_buf[idx * 2]     = (c >> 8) & 0xFF;
+                eye_buf[idx * 2 + 1] = c & 0xFF;
+            }
+        }
+    }
+    st7789_set_window(FOURZE_EYE_X, FOURZE_EYE_Y, FOURZE_EYE_X + FOURZE_EYE_W - 1, FOURZE_EYE_Y + FOURZE_EYE_H - 1);
+    lcd_data(eye_buf, FOURZE_EYE_W * FOURZE_EYE_H * 2);
+
+    // 2. Rocket thruster flicker at exhaust (X=86..89, Y=244..247)
+    static const uint16_t flame_colors[4] = { 0xFD20, 0xFFE0, 0xFA00, 0xFFFF };
+    uint8_t flame_buf[4 * 4 * 2];
+    uint16_t flame_col = flame_colors[(frame + (frame / 2)) % 4];
+    uint8_t f_hi = (flame_col >> 8) & 0xFF;
+    uint8_t f_lo = flame_col & 0xFF;
+    for (int i = 0; i < 4 * 4; i++) {
+        flame_buf[i * 2]     = f_hi;
+        flame_buf[i * 2 + 1] = f_lo;
+    }
+    st7789_set_window(86, 244, 89, 247);
+    lcd_data(flame_buf, sizeof(flame_buf));
+
+    // 3. Cosmic starlight particles in left & right space margins
+    int star1_y = 40 + ((frame * 2) % 200);
+    int star2_y = 200 - ((frame * 3) % 180);
+    static const uint8_t star_pix[2 * 2 * 2] = { 0x07, 0xFF, 0x07, 0xFF, 0x07, 0xFF, 0x07, 0xFF }; // Cyan cyber star
+    st7789_set_window(4, star1_y, 5, star1_y + 1);
+    lcd_data(star_pix, sizeof(star_pix));
+    st7789_set_window(164, star2_y, 165, star2_y + 1);
+    lcd_data(star_pix, sizeof(star_pix));
+}
+
+static void tembed_render_faiz_complete(uint32_t frame) {
+    if (frame < 4) {
+        // Blinding golden-white visor flash impact (first ~150ms)!
+        for (int i = 0; i < FAIZ_EYE_W * FAIZ_EYE_H; i++) {
+            uint16_t c = faiz_eye_base[i];
+            uint8_t r = (c >> 11) & 0x1F;
+            uint8_t g = (c >> 5) & 0x3F;
+            uint8_t b = c & 0x1F;
+            if (r > 15 && g > 15) {
+                eye_buf[i * 2]     = 0xFF;
+                eye_buf[i * 2 + 1] = 0xE0; // Henshin Gold
+            } else if (r > 15 && g < 10) {
+                eye_buf[i * 2]     = 0xF8;
+                eye_buf[i * 2 + 1] = 0x00; // Neon scarlet
+            } else {
+                eye_buf[i * 2]     = (c >> 8) & 0xFF;
+                eye_buf[i * 2 + 1] = c & 0xFF;
+            }
+        }
+    } else {
+        // Blazing yellow Ultimate Finder eyes pulsing & red photon streams pumping
+        float pulse = 0.75f + 0.25f * sinf((float)(frame - 4) * 0.28f);
+
+        for (int i = 0; i < FAIZ_EYE_W * FAIZ_EYE_H; i++) {
+            uint16_t c = faiz_eye_base[i];
+            uint8_t r = (c >> 11) & 0x1F;
+            uint8_t g = (c >> 5) & 0x3F;
+            uint8_t b = c & 0x1F;
+
+            // Ultimate Finder circular eyes: bright yellow/amber
+            if (r > 20 && g > 25 && b < 20) {
+                uint8_t r_new = (uint8_t)(r * pulse);
+                uint8_t g_new = (uint8_t)(g * pulse);
+                if (r_new > 31) r_new = 31;
+                if (g_new > 63) g_new = 63;
+
+                // Center core white-hot glare
+                if (pulse > 0.85f && r > 28 && g > 50) {
+                    r_new = 31;
+                    g_new = 63;
+                    b = 20; // Blazing white-gold center
+                }
+                uint16_t pix = (r_new << 11) | (g_new << 5) | b;
+                eye_buf[i * 2]     = (pix >> 8) & 0xFF;
+                eye_buf[i * 2 + 1] = pix & 0xFF;
+            } else if (r > 16 && g < 12 && b < 12) {
+                // Red Photon Blood Stream outlines: pulsating crimson
+                uint8_t r_crimson = (uint8_t)(31.0f * (0.80f + 0.20f * pulse));
+                if (r_crimson > 31) r_crimson = 31;
+                uint16_t pix = (r_crimson << 11) | (g << 5) | b;
+                eye_buf[i * 2]     = (pix >> 8) & 0xFF;
+                eye_buf[i * 2 + 1] = pix & 0xFF;
+            } else {
+                eye_buf[i * 2]     = (c >> 8) & 0xFF;
+                eye_buf[i * 2 + 1] = c & 0xFF;
+            }
+        }
+    }
+    st7789_set_window(FAIZ_EYE_X, FAIZ_EYE_Y, FAIZ_EYE_X + FAIZ_EYE_W - 1, FAIZ_EYE_Y + FAIZ_EYE_H - 1);
+    lcd_data(eye_buf, FAIZ_EYE_W * FAIZ_EYE_H * 2);
+
+    // Victory sparkles around padlock (alternating stars)
+    uint16_t spark_col = ((frame / 3) % 2 == 0) ? 0xFFE0 : 0xFFFF;
+    uint8_t spk[2 * 2 * 2];
+    uint8_t shi = (spark_col >> 8) & 0xFF;
+    uint8_t slo = spark_col & 0xFF;
+    for (int i = 0; i < 4; i++) { spk[i * 2] = shi; spk[i * 2 + 1] = slo; }
+    st7789_set_window(52, 222, 53, 223);
+    lcd_data(spk, sizeof(spk));
+    st7789_set_window(116, 222, 117, 223);
+    lcd_data(spk, sizeof(spk));
 }
 
 static void tembed_render_space(uint32_t frame) {
@@ -465,13 +601,18 @@ static void tembed_ui_task(void *pvParameters) {
     tembed_ui_state_t current_state = TEMBED_UI_READY;
     tembed_ui_state_t new_state;
     uint32_t anim_frame = 0;
+    uint32_t success_start_tick = 0;
 
     while (1) {
         TickType_t wait_ticks;
         if (current_state == TEMBED_UI_WAIT_USER) {
-            wait_ticks = pdMS_TO_TICKS(50); // 20 FPS live animation loop
-        } else if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
-            wait_ticks = pdMS_TO_TICKS(2000); // 2.0s display for Complete / Timeout card
+            wait_ticks = pdMS_TO_TICKS(50); // 20 FPS live animation loop (W Countdown)
+        } else if (current_state == TEMBED_UI_READY) {
+            wait_ticks = pdMS_TO_TICKS(80); // ~12 FPS live animation loop (Fourze Idle)
+        } else if (current_state == TEMBED_UI_SUCCESS) {
+            wait_ticks = pdMS_TO_TICKS(50); // 20 FPS live animation loop (Faiz Complete)
+        } else if (current_state == TEMBED_UI_ERROR) {
+            wait_ticks = pdMS_TO_TICKS(2500); // 2.5s display for Timeout card
         } else {
             wait_ticks = portMAX_DELAY;
         }
@@ -485,10 +626,19 @@ static void tembed_ui_task(void *pvParameters) {
                 if (current_state == TEMBED_UI_WAIT_USER) {
                     g_wait_start_tick = xTaskGetTickCount();
                     anim_frame = 0;
+                } else if (current_state == TEMBED_UI_SUCCESS) {
+                    success_start_tick = xTaskGetTickCount();
+                    anim_frame = 0;
+                } else if (current_state == TEMBED_UI_READY) {
+                    anim_frame = 0;
                 }
             }
         } else {
-            if (current_state == TEMBED_UI_WAIT_USER) {
+            if (current_state == TEMBED_UI_READY) {
+                anim_frame++;
+                tembed_render_fourze_idle(anim_frame);
+
+            } else if (current_state == TEMBED_UI_WAIT_USER) {
                 anim_frame++;
                 uint32_t now_tick = xTaskGetTickCount();
                 uint32_t elapsed_ms = (now_tick >= g_wait_start_tick) ? 
@@ -504,7 +654,20 @@ static void tembed_ui_task(void *pvParameters) {
                 tembed_render_space(anim_frame);
                 tembed_render_hud(progress, remaining_sec, anim_frame);
 
-            } else if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
+            } else if (current_state == TEMBED_UI_SUCCESS) {
+                anim_frame++;
+                uint32_t now_tick = xTaskGetTickCount();
+                uint32_t elapsed_ms = (now_tick >= success_start_tick) ? 
+                    ((now_tick - success_start_tick) * 1000 / configTICK_RATE_HZ) : 0;
+
+                if (elapsed_ms < 3200) {
+                    tembed_render_faiz_complete(anim_frame);
+                } else {
+                    current_state = TEMBED_UI_READY;
+                    tembed_draw_screen(TEMBED_UI_READY);
+                }
+
+            } else if (current_state == TEMBED_UI_ERROR) {
                 current_state = TEMBED_UI_READY;
                 tembed_draw_screen(TEMBED_UI_READY);
             }
@@ -842,11 +1005,11 @@ def copy_audio():
         print("Copied tembed_audio_data.h to SDK")
 
 def copy_eye_data():
-    src = os.path.join(ROOT, "w_eye_data.h")
-    dst = os.path.join(SDK_DIR, "src", "w_eye_data.h")
+    src = os.path.join(ROOT, "kamen_rider_eyes.h")
+    dst = os.path.join(SDK_DIR, "src", "kamen_rider_eyes.h")
     if os.path.exists(src):
         shutil.copy(src, dst)
-        print("Copied w_eye_data.h to SDK")
+        print("Copied kamen_rider_eyes.h to SDK")
 
 def create_display_files():
     src_dir = os.path.join(SDK_DIR, "src")
@@ -1248,7 +1411,7 @@ static int neopixel_signal_cb(signal_code_t code, void *data) {
             break;
         case SIGNAL_USER_PRESENCE_COMPLETED:
             led_ui_state = TEMBED_LED_SUCCESS;
-            led_ui_until_ms = now + 2000; // Solid green for 2 seconds
+            led_ui_until_ms = now + 3200; // 3.2 seconds matching Faiz Complete Henshin!
             break;
         case SIGNAL_USER_PRESENCE_TIMEOUT:
             led_ui_state = TEMBED_LED_TIMEOUT;
@@ -1281,13 +1444,30 @@ void led_driver_color_neopixel(uint8_t color, uint32_t led_brightness, float pro
 
     uint32_t now = board_millis();
 
-    // 1. User pressed button / verified: Solid GREEN for 2.0s!
+    // 1. User pressed button / verified: Faiz Complete Photon Burst -> Solid Green!
     if (led_ui_state == TEMBED_LED_SUCCESS) {
         if (now < led_ui_until_ms) {
-            uint8_t g = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
-            for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-                spx[i].index = i;
-                spx[i].rgb = neopixel_rgb_ordered(0, g, 0);
+            uint32_t remaining = led_ui_until_ms - now;
+            uint32_t elapsed = (remaining <= 3200) ? (3200 - remaining) : 0;
+            if (elapsed < 600) {
+                // High-speed rotating crimson / gold photon comet!
+                int head = (elapsed / 40) % NEOPIXEL_COUNT;
+                for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+                    spx[i].index = i;
+                    if (i == head) {
+                        spx[i].rgb = neopixel_rgb_ordered(255, 220, 0); // Gold head
+                    } else if (i == (head + 1) % NEOPIXEL_COUNT || i == (head - 1 + NEOPIXEL_COUNT) % NEOPIXEL_COUNT) {
+                        spx[i].rgb = neopixel_rgb_ordered(255, 0, 0); // Crimson tail
+                    } else {
+                        spx[i].rgb = neopixel_rgb_ordered(30, 0, 0);
+                    }
+                }
+            } else {
+                uint8_t g = (uint8_t)(255.0f * BRIGHTNESS_SCALE);
+                for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+                    spx[i].index = i;
+                    spx[i].rgb = neopixel_rgb_ordered(0, g, 0);
+                }
             }
             neopixel_SetPixel(neopixel, spx, NEOPIXEL_COUNT);
             return;
