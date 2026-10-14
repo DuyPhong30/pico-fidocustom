@@ -39,7 +39,10 @@ void tembed_display_set_state(tembed_ui_state_t state);
 
 TEMBED_DISPLAY_C = """#include "tembed_display.h"
 #include "tembed_images.h"
+#include "w_eye_data.h"
 #include <string.h>
+#include <stdio.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -59,8 +62,18 @@ TEMBED_DISPLAY_C = """#include "tembed_display.h"
 #define OFFSET_X 35
 #define OFFSET_Y 0
 
+#define HUD_Y_START 276
+#define HUD_H       44
+#define HUD_W       170
+
 static spi_device_handle_t spi_lcd = NULL;
 static QueueHandle_t ui_queue = NULL;
+static volatile uint32_t g_ui_timeout_sec = 30;
+static volatile uint32_t g_wait_start_tick = 0;
+static int s_last_beam_y = -1;
+
+static uint8_t hud_buf[HUD_W * HUD_H * 2];
+static uint8_t eye_buf[W_EYE_W * W_EYE_H * 2];
 
 static void lcd_cmd(uint8_t cmd) {
     gpio_set_level(TFT_DC, 0);
@@ -168,6 +181,259 @@ static void st7789_hw_init(void) {
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+static const uint8_t font5x7_digits[][5] = {
+    { 0x3E, 0x51, 0x49, 0x45, 0x3E }, // 0
+    { 0x00, 0x42, 0x7F, 0x40, 0x00 }, // 1
+    { 0x42, 0x61, 0x51, 0x49, 0x46 }, // 2
+    { 0x21, 0x41, 0x45, 0x4B, 0x31 }, // 3
+    { 0x18, 0x14, 0x12, 0x7F, 0x10 }, // 4
+    { 0x27, 0x45, 0x45, 0x45, 0x39 }, // 5
+    { 0x3C, 0x4A, 0x49, 0x49, 0x30 }, // 6
+    { 0x01, 0x71, 0x09, 0x05, 0x03 }, // 7
+    { 0x36, 0x49, 0x49, 0x49, 0x36 }, // 8
+    { 0x06, 0x49, 0x49, 0x29, 0x1E }, // 9
+};
+
+static const uint8_t *get_glyph(char c) {
+    static const uint8_t g_space[5] = {0,0,0,0,0};
+    static const uint8_t g_brack_l[5] = {0x00, 0x7F, 0x41, 0x41, 0x00}; // '['
+    static const uint8_t g_brack_r[5] = {0x00, 0x41, 0x41, 0x7F, 0x00}; // ']'
+    static const uint8_t g_s[5] = {0x48, 0x54, 0x54, 0x54, 0x20};       // 's'
+    static const uint8_t g_p[5] = {0x7F, 0x09, 0x09, 0x09, 0x06};       // 'P'
+    static const uint8_t g_r[5] = {0x7F, 0x09, 0x19, 0x29, 0x46};       // 'R'
+    static const uint8_t g_e[5] = {0x7F, 0x49, 0x49, 0x49, 0x41};       // 'E'
+    static const uint8_t g_k[5] = {0x7F, 0x08, 0x14, 0x22, 0x41};       // 'K'
+    static const uint8_t g_n[5] = {0x7F, 0x04, 0x08, 0x10, 0x7F};       // 'N'
+    static const uint8_t g_o[5] = {0x3E, 0x41, 0x41, 0x41, 0x3E};       // 'O'
+    static const uint8_t g_b[5] = {0x7F, 0x49, 0x49, 0x49, 0x36};       // 'B'
+    static const uint8_t g_gt[5] = {0x41, 0x22, 0x14, 0x08, 0x00};      // '>'
+    static const uint8_t g_lt[5] = {0x08, 0x14, 0x22, 0x41, 0x00};      // '<'
+    static const uint8_t g_excl[5] = {0x00, 0x00, 0x5F, 0x00, 0x00};    // '!'
+    static const uint8_t g_colon[5] = {0x00, 0x36, 0x36, 0x00, 0x00};   // ':'
+
+    if (c >= '0' && c <= '9') return font5x7_digits[c - '0'];
+    if (c == '[') return g_brack_l;
+    if (c == ']') return g_brack_r;
+    if (c == 's' || c == 'S') return g_s;
+    if (c == 'P') return g_p;
+    if (c == 'R') return g_r;
+    if (c == 'E') return g_e;
+    if (c == 'K') return g_k;
+    if (c == 'N') return g_n;
+    if (c == 'O') return g_o;
+    if (c == 'B') return g_b;
+    if (c == '>') return g_gt;
+    if (c == '<') return g_lt;
+    if (c == '!') return g_excl;
+    if (c == ':') return g_colon;
+    return g_space;
+}
+
+static void hud_clear(uint16_t bg_color) {
+    uint8_t hi = (bg_color >> 8) & 0xFF;
+    uint8_t lo = bg_color & 0xFF;
+    for (int i = 0; i < HUD_W * HUD_H; i++) {
+        hud_buf[i * 2]     = hi;
+        hud_buf[i * 2 + 1] = lo;
+    }
+}
+
+static inline void hud_set_pixel(int x, int y, uint16_t color) {
+    int ly = y - HUD_Y_START;
+    if (x < 0 || x >= HUD_W || ly < 0 || ly >= HUD_H) return;
+    int idx = (ly * HUD_W + x) * 2;
+    hud_buf[idx]     = (color >> 8) & 0xFF;
+    hud_buf[idx + 1] = color & 0xFF;
+}
+
+static void hud_draw_rect(int x, int y, int w, int h, uint16_t color) {
+    for (int px = x; px < x + w; px++) {
+        hud_set_pixel(px, y, color);
+        hud_set_pixel(px, y + h - 1, color);
+    }
+    for (int py = y; py < y + h; py++) {
+        hud_set_pixel(x, py, color);
+        hud_set_pixel(x + w - 1, py, color);
+    }
+}
+
+static void hud_fill_rect(int x, int y, int w, int h, uint16_t color) {
+    for (int py = y; py < y + h; py++) {
+        for (int px = x; px < x + w; px++) {
+            hud_set_pixel(px, py, color);
+        }
+    }
+}
+
+static void hud_draw_char(int x, int y, char c, uint16_t color, int scale) {
+    const uint8_t *glyph = get_glyph(c);
+    for (int col = 0; col < 5; col++) {
+        uint8_t line = glyph[col];
+        for (int row = 0; row < 7; row++) {
+            if (line & (1 << row)) {
+                if (scale == 1) {
+                    hud_set_pixel(x + col, y + row, color);
+                } else {
+                    for (int dy = 0; dy < scale; dy++) {
+                        for (int dx = 0; dx < scale; dx++) {
+                            hud_set_pixel(x + col * scale + dx, y + row * scale + dy, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void hud_draw_string(int x, int y, const char *str, uint16_t color, int scale) {
+    int cur_x = x;
+    while (*str) {
+        hud_draw_char(cur_x, y, *str, color, scale);
+        cur_x += (5 * scale) + (scale == 1 ? 1 : 2);
+        str++;
+    }
+}
+
+static void tembed_render_hud(float progress, int remaining_sec, uint32_t frame) {
+    // 1. Dark futuristic slate background
+    hud_clear(0x0842); // very deep sleek navy / cyber space
+
+    // 2. High-tech border and corner accents
+    hud_draw_rect(2, HUD_Y_START + 1, HUD_W - 4, HUD_H - 2, 0x03EF);
+    hud_fill_rect(2, HUD_Y_START + 1, 4, 2, 0x07FF);
+    hud_fill_rect(HUD_W - 6, HUD_Y_START + 1, 4, 2, 0x07FF);
+    hud_fill_rect(2, HUD_Y_START + HUD_H - 3, 4, 2, 0x07FF);
+    hud_fill_rect(HUD_W - 6, HUD_Y_START + HUD_H - 3, 4, 2, 0x07FF);
+
+    // 3. Countdown Energy Bar (Y = 280 to 286, X = 15 to 154, width = 140)
+    int bar_x = 15;
+    int bar_y = HUD_Y_START + 4;
+    int bar_w = 140;
+    int bar_h = 7;
+    hud_draw_rect(bar_x, bar_y, bar_w, bar_h, 0x7BEF);
+
+    uint16_t energy_color;
+    if (remaining_sec > 12) {
+        energy_color = 0x07E0; // Neon Emerald Green (Gaia Memory active)
+    } else if (remaining_sec > 5) {
+        energy_color = 0xFD20; // Amber Orange (Warning)
+    } else {
+        energy_color = ((frame / 4) % 2 == 0) ? 0xF800 : 0x8000; // Critical Flashing Red
+    }
+
+    int fill_w = (int)((bar_w - 2) * progress);
+    if (fill_w < 0) fill_w = 0;
+    if (fill_w > bar_w - 2) fill_w = bar_w - 2;
+
+    for (int px = 0; px < fill_w; px++) {
+        if ((px % 4) == 3) continue; // Retro sci-fi segment gap
+        for (int py = bar_y + 1; py < bar_y + bar_h - 1; py++) {
+            hud_set_pixel(bar_x + 1 + px, py, energy_color);
+        }
+    }
+
+    // 4. Large Digital Countdown Clock: "[ 28s ]" (scale = 2)
+    char time_str[16];
+    if (remaining_sec >= 10) {
+        snprintf(time_str, sizeof(time_str), "[ %ds ]", remaining_sec);
+    } else {
+        snprintf(time_str, sizeof(time_str), "[  %ds ]", remaining_sec);
+    }
+    int time_x = (HUD_W - (7 * 12)) / 2; // Centered at X=43
+    uint16_t text_color = (remaining_sec <= 5) ? energy_color : 0xFFFF;
+    hud_draw_string(time_x, HUD_Y_START + 14, time_str, text_color, 2);
+
+    // 5. Blinking Instruction Prompt: ">> PRESS KNOB <<" (scale = 1)
+    if ((frame / 10) % 2 == 0) {
+        const char *prompt = ">> PRESS KNOB <<";
+        int prompt_x = (HUD_W - (16 * 6)) / 2;
+        hud_draw_string(prompt_x, HUD_Y_START + 31, prompt, 0xFFE0, 1); // Henshin Gold
+    }
+
+    // Single burst write to ST7789
+    st7789_set_window(0, HUD_Y_START, HUD_W - 1, HUD_Y_START + HUD_H - 1);
+    lcd_data(hud_buf, sizeof(hud_buf));
+}
+
+static void tembed_render_eyes(uint32_t frame) {
+    float phase = (float)frame * 0.15f;
+    float pulse = 0.60f + 0.40f * sinf(phase);
+
+    int glint_col = (frame % 70) * 2 - 15; // Anime visor flare glint every ~3.5s
+
+    for (int y = 0; y < W_EYE_H; y++) {
+        for (int x = 0; x < W_EYE_W; x++) {
+            int idx = y * W_EYE_W + x;
+            uint16_t c = w_eye_base[idx];
+            uint8_t r = (c >> 11) & 0x1F;
+            uint8_t g = (c >> 5) & 0x3F;
+            uint8_t b = c & 0x1F;
+
+            if (r > 12 && g < 15 && b < 15) { // Ruby compound eye pixel
+                uint8_t r_new = (uint8_t)(r * pulse);
+                if (r_new > 31) r_new = 31;
+                if (r_new < 5) r_new = 5;
+
+                if (pulse > 0.85f && r > 20) {
+                    g += (uint8_t)((pulse - 0.85f) * 50.0f);
+                    if (g > 63) g = 63;
+                }
+
+                int dist = (x - y / 2) - glint_col;
+                if (dist >= -1 && dist <= 1) {
+                    r_new = 31;
+                    g = 63;
+                    b = 31; // Brilliant lens flare glint
+                }
+
+                uint16_t pix = (r_new << 11) | (g << 5) | b;
+                eye_buf[idx * 2]     = (pix >> 8) & 0xFF;
+                eye_buf[idx * 2 + 1] = pix & 0xFF;
+            } else {
+                eye_buf[idx * 2]     = (c >> 8) & 0xFF;
+                eye_buf[idx * 2 + 1] = c & 0xFF;
+            }
+        }
+    }
+
+    st7789_set_window(W_EYE_X, W_EYE_Y, W_EYE_X + W_EYE_W - 1, W_EYE_Y + W_EYE_H - 1);
+    lcd_data(eye_buf, sizeof(eye_buf));
+}
+
+static void tembed_render_space(uint32_t frame) {
+    int beam_y = 15 + ((frame * 3) % 245);
+
+    if (s_last_beam_y >= 0 && s_last_beam_y != beam_y) {
+        static const uint8_t bg_clean[5 * 3 * 2] = {
+            0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E,
+            0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E,
+            0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E, 0xCE, 0x7E
+        };
+        st7789_set_window(3, s_last_beam_y, 7, s_last_beam_y + 2);
+        lcd_data(bg_clean, sizeof(bg_clean));
+
+        st7789_set_window(162, s_last_beam_y, 166, s_last_beam_y + 2);
+        lcd_data(bg_clean, sizeof(bg_clean));
+    }
+
+    uint16_t beam_col = ((frame / 15) % 2 == 0) ? 0x07FF : 0x07E0;
+    uint8_t beam_pixels[5 * 3 * 2];
+    uint8_t hi = (beam_col >> 8) & 0xFF;
+    uint8_t lo = beam_col & 0xFF;
+    for (int i = 0; i < 5 * 3; i++) {
+        beam_pixels[i * 2]     = hi;
+        beam_pixels[i * 2 + 1] = lo;
+    }
+
+    st7789_set_window(3, beam_y, 7, beam_y + 2);
+    lcd_data(beam_pixels, sizeof(beam_pixels));
+
+    st7789_set_window(162, beam_y, 166, beam_y + 2);
+    lcd_data(beam_pixels, sizeof(beam_pixels));
+
+    s_last_beam_y = beam_y;
+}
+
 static void tembed_draw_screen(tembed_ui_state_t state) {
     switch (state) {
         case TEMBED_UI_READY:
@@ -194,21 +460,47 @@ static void tembed_ui_task(void *pvParameters) {
 
     tembed_ui_state_t current_state = TEMBED_UI_READY;
     tembed_ui_state_t new_state;
+    uint32_t anim_frame = 0;
 
     while (1) {
-        TickType_t wait_ticks = portMAX_DELAY;
-        if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
-            wait_ticks = pdMS_TO_TICKS(2000); // Keep Confirmed / Timeout card for 2.0s
+        TickType_t wait_ticks;
+        if (current_state == TEMBED_UI_WAIT_USER) {
+            wait_ticks = pdMS_TO_TICKS(50); // 20 FPS live animation loop
+        } else if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
+            wait_ticks = pdMS_TO_TICKS(2000); // 2.0s display for Complete / Timeout card
+        } else {
+            wait_ticks = portMAX_DELAY;
         }
 
-        if (xQueueReceive(ui_queue, &new_state, wait_ticks)) {
+        if (xQueueReceive(ui_queue, &new_state, wait_ticks) == pdTRUE) {
             if (new_state != current_state) {
                 current_state = new_state;
+                s_last_beam_y = -1;
                 tembed_draw_screen(current_state);
+
+                if (current_state == TEMBED_UI_WAIT_USER) {
+                    g_wait_start_tick = xTaskGetTickCount();
+                    anim_frame = 0;
+                }
             }
         } else {
-            // After 2.0s in SUCCESS or ERROR, return to READY (sleeping cat)
-            if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
+            if (current_state == TEMBED_UI_WAIT_USER) {
+                anim_frame++;
+                uint32_t now_tick = xTaskGetTickCount();
+                uint32_t elapsed_ms = (now_tick >= g_wait_start_tick) ? 
+                    ((now_tick - g_wait_start_tick) * 1000 / configTICK_RATE_HZ) : 0;
+                uint32_t total_ms = (g_ui_timeout_sec > 0) ? (g_ui_timeout_sec * 1000) : 30000;
+
+                int remaining_sec = (total_ms > elapsed_ms) ? (int)((total_ms - elapsed_ms) / 1000) : 0;
+                float progress = (float)(total_ms - elapsed_ms) / (float)total_ms;
+                if (progress < 0.0f) progress = 0.0f;
+                if (progress > 1.0f) progress = 1.0f;
+
+                tembed_render_eyes(anim_frame);
+                tembed_render_space(anim_frame);
+                tembed_render_hud(progress, remaining_sec, anim_frame);
+
+            } else if (current_state == TEMBED_UI_SUCCESS || current_state == TEMBED_UI_ERROR) {
                 current_state = TEMBED_UI_READY;
                 tembed_draw_screen(TEMBED_UI_READY);
             }
@@ -223,13 +515,18 @@ void tembed_display_set_state(tembed_ui_state_t state) {
 }
 
 static int tembed_signal_cb(signal_code_t code, void *data) {
-    (void)data;
     switch (code) {
         case SIGNAL_BOOT:
         case SIGNAL_USB_MOUNTED:
             tembed_display_set_state(TEMBED_UI_READY);
             break;
         case SIGNAL_USER_PRESENCE_REQUEST:
+            if (data) {
+                signal_user_presence_request_data_t *req = (signal_user_presence_request_data_t *)data;
+                g_ui_timeout_sec = (req->timeout > 0) ? req->timeout : 30;
+            } else {
+                g_ui_timeout_sec = 30;
+            }
             tembed_display_set_state(TEMBED_UI_WAIT_USER);
             break;
         case SIGNAL_USER_PRESENCE_COMPLETED:
@@ -249,7 +546,7 @@ static int tembed_signal_cb(signal_code_t code, void *data) {
 
 void tembed_display_start(void) {
     ui_queue = xQueueCreate(8, sizeof(tembed_ui_state_t));
-    xTaskCreate(tembed_ui_task, "tembed_ui", 3072, NULL, 1, NULL);
+    xTaskCreate(tembed_ui_task, "tembed_ui", 4096, NULL, 1, NULL);
 
     signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, tembed_signal_cb);
     signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, tembed_signal_cb);
@@ -273,9 +570,8 @@ TEMBED_AUDIO_H = """/*
 
 typedef enum {
     TEMBED_SOUND_NONE = 0,
-    TEMBED_SOUND_BOOT,      // Startup chime (Faiz "Standing By" once)
-    TEMBED_SOUND_WAITING,   // Faiz "Standing By" loop
-    TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!"
+    TEMBED_SOUND_WAITING,   // Faiz "Standing By" long continuous sound loop
+    TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!" + Henshin burst
     TEMBED_SOUND_TIMEOUT,   // Buzzer Error
     TEMBED_SOUND_STOP
 } tembed_sound_t;
@@ -388,45 +684,39 @@ static void tembed_audio_task(void *pvParameters) {
     (void)pvParameters;
     tembed_i2s_init();
 
-    // Play startup chime once after 150ms so user immediately hears audio
-    vTaskDelay(pdMS_TO_TICKS(150));
-    tembed_audio_play(TEMBED_SOUND_BOOT);
-
     tembed_sound_t cur_sound = TEMBED_SOUND_NONE;
     int16_t stereo_buf[128 * 2];
 
     while (1) {
-        tembed_sound_t req;
-        if (xQueueReceive(audio_queue, &req, portMAX_DELAY)) {
-            cur_sound = req;
+        if (cur_sound == TEMBED_SOUND_NONE || cur_sound == TEMBED_SOUND_STOP) {
+            if (xQueueReceive(audio_queue, &cur_sound, portMAX_DELAY) != pdTRUE) {
+                continue;
+            }
         }
 
-        if (cur_sound == TEMBED_SOUND_NONE || cur_sound == TEMBED_SOUND_STOP) {
+        if (cur_sound == TEMBED_SOUND_STOP || cur_sound == TEMBED_SOUND_NONE) {
+            tembed_i2s_silence(128);
+            cur_sound = TEMBED_SOUND_NONE;
             continue;
         }
 
-        const uint8_t *pcm_u8 = NULL;
+        const uint8_t *pcm = NULL;
         size_t total_samples = 0;
         bool loop = false;
 
         switch (cur_sound) {
-            case TEMBED_SOUND_BOOT:
-                pcm_u8 = sound_waiting_pcm;
-                total_samples = sound_waiting_samples;
-                loop = false;
-                break;
             case TEMBED_SOUND_WAITING:
-                pcm_u8 = sound_waiting_pcm;
+                pcm = sound_waiting_pcm;
                 total_samples = sound_waiting_samples;
                 loop = true;
                 break;
             case TEMBED_SOUND_CONFIRMED:
-                pcm_u8 = sound_confirmed_pcm;
+                pcm = sound_confirmed_pcm;
                 total_samples = sound_confirmed_samples;
                 loop = false;
                 break;
             case TEMBED_SOUND_TIMEOUT:
-                pcm_u8 = sound_timeout_pcm;
+                pcm = sound_timeout_pcm;
                 total_samples = sound_timeout_samples;
                 loop = false;
                 break;
@@ -434,53 +724,65 @@ static void tembed_audio_task(void *pvParameters) {
                 break;
         }
 
-        if (!pcm_u8 || total_samples == 0) {
+        if (!pcm || total_samples == 0) {
             cur_sound = TEMBED_SOUND_NONE;
             continue;
         }
 
         size_t pos = 0;
-        while (pos < total_samples && cur_sound != TEMBED_SOUND_STOP && cur_sound != TEMBED_SOUND_NONE) {
-            if (xQueueReceive(audio_queue, &req, 0)) {
+        bool switched = false;
+
+        while (pos < total_samples) {
+            tembed_sound_t req;
+            if (xQueueReceive(audio_queue, &req, 0) == pdTRUE) {
                 cur_sound = req;
-                break;
+                switched = true;
+                break; // Switch to new sound immediately!
             }
 
-            size_t chunk = 128;
-            if (pos + chunk > total_samples) {
-                chunk = total_samples - pos;
-            }
-
+            size_t chunk = (total_samples - pos > 128) ? 128 : (total_samples - pos);
             for (size_t i = 0; i < chunk; i++) {
-                int16_t s16 = ((int16_t)pcm_u8[pos + i] - 128) << 8;
+                int16_t s16 = ((int16_t)pcm[pos + i] - 128) << 8;
                 stereo_buf[i * 2]     = s16;
                 stereo_buf[i * 2 + 1] = s16;
             }
-
             tembed_i2s_write(stereo_buf, chunk * 2 * sizeof(int16_t));
             pos += chunk;
-
-            if (pos >= total_samples && loop) {
-                pos = 0;
-                tembed_i2s_silence(256);
-                for (int d = 0; d < 8; d++) {
-                    if (xQueueReceive(audio_queue, &req, pdMS_TO_TICKS(100))) {
-                        cur_sound = req;
-                        break;
-                    }
-                }
-            }
         }
 
-        if (!loop || cur_sound != TEMBED_SOUND_WAITING) {
+        if (switched) {
+            // cur_sound contains the new sound (e.g. CONFIRMED or STOP)
+            continue;
+        }
+
+        if (loop) {
+            // Check queue frequently during short inter-loop gap
+            for (int p = 0; p < 8; p++) {
+                tembed_sound_t req;
+                if (xQueueReceive(audio_queue, &req, pdMS_TO_TICKS(50)) == pdTRUE) {
+                    cur_sound = req;
+                    switched = true;
+                    break;
+                }
+            }
+            if (switched) {
+                continue;
+            }
+            // Loop again
+            continue;
+        } else {
+            // One-shot sound finished (CONFIRMED or TIMEOUT)
+            tembed_i2s_silence(256);
             cur_sound = TEMBED_SOUND_NONE;
-            tembed_i2s_silence(128);
         }
     }
 }
 
 void tembed_audio_play(tembed_sound_t sound) {
     if (audio_queue) {
+        if (sound == TEMBED_SOUND_CONFIRMED || sound == TEMBED_SOUND_STOP) {
+            xQueueReset(audio_queue);
+        }
         xQueueSend(audio_queue, &sound, 0);
     }
 }
@@ -498,6 +800,8 @@ static int tembed_audio_signal_cb(signal_code_t code, void *data) {
             tembed_audio_play(TEMBED_SOUND_TIMEOUT);
             break;
         case SIGNAL_USER_PRESENCE_CANCELLED:
+        case SIGNAL_BOOT:
+        case SIGNAL_USB_MOUNTED:
             tembed_audio_play(TEMBED_SOUND_STOP);
             break;
         default:
@@ -514,6 +818,8 @@ void tembed_audio_start(void) {
     signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_CANCELLED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
+    signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
 }
 """
 
@@ -530,6 +836,13 @@ def copy_audio():
     if os.path.exists(src):
         shutil.copy(src, dst)
         print("Copied tembed_audio_data.h to SDK")
+
+def copy_eye_data():
+    src = os.path.join(ROOT, "w_eye_data.h")
+    dst = os.path.join(SDK_DIR, "src", "w_eye_data.h")
+    if os.path.exists(src):
+        shutil.copy(src, dst)
+        print("Copied w_eye_data.h to SDK")
 
 def create_display_files():
     src_dir = os.path.join(SDK_DIR, "src")
@@ -1067,6 +1380,7 @@ if __name__ == "__main__":
     print("Starting LILYGO T-Embed patch...")
     copy_images()
     copy_audio()
+    copy_eye_data()
     create_display_files()
     create_audio_files()
     patch_main_c()

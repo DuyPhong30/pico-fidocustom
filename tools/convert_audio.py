@@ -35,11 +35,11 @@ def main():
     confirmed_mp3 = os.path.join(SOUNDS_DIR, "confirmed.mp3")
     timeout_mp3 = os.path.join(SOUNDS_DIR, "timeout.mp3")
 
-    # 1. Waiting: Faiz "Standing By" (~1.2s)
+    # 1. Waiting: Long continuous Faiz "Standing By" and electronic standby rhythm (~8.3s)
     raw_waiting = convert_clip(waiting_mp3)
 
-    # 2. Confirmed: Faiz "COMPLETE!" + Henshin photon stream burst (~2.2s)
-    raw_confirmed = convert_clip(confirmed_mp3, start_sec=1.6, duration_sec=2.2)
+    # 2. Confirmed: Faiz "COMPLETE!" + Henshin photon stream burst (~2.8s)
+    raw_confirmed = convert_clip(confirmed_mp3, start_sec=1.5, duration_sec=2.8)
 
     # 3. Timeout: Buzzer Error (~1.5s)
     raw_timeout = convert_clip(timeout_mp3, duration_sec=1.5)
