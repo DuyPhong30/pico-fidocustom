@@ -609,11 +609,19 @@ def patch_button_c():
         "return 30;"
     )
 
-    # 2. In button_wait_start_timeout, force button wait unconditionally
-    target_start = "void button_wait_start_timeout(uint32_t timeout_seconds) {"
+    # 2. In button_wait_start_timeout, force 30s wait and remove early return
+    target_start = """void button_wait_start_timeout(uint32_t timeout_seconds) {
+    uint32_t button_timeout = timeout_seconds * 1000;
+    if (button_timeout == 0 && !force_button_wait) {
+        signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
+        uint32_t flag = EV_BUTTON_PRESSED;
+        queue_try_add(&usb_to_card_q, &flag);
+        return;
+    }"""
     replacement_start = """void button_wait_start_timeout(uint32_t timeout_seconds) {
+    if (timeout_seconds == 0) timeout_seconds = 30;
     force_button_wait = true;
-    if (timeout_seconds == 0) timeout_seconds = 30;"""
+    uint32_t button_timeout = timeout_seconds * 1000;"""
     content = content.replace(target_start, replacement_start, 1)
 
     # 3. Reset async_button_pressed to false initially
@@ -622,11 +630,17 @@ def patch_button_c():
         "async_button_pressed = false;"
     )
 
-    # 4. In button_wait_poll, trigger immediately when rotary knob button is pressed
-    content = content.replace(
-        "else if (async_button_pressed && !pressed) {",
-        "else if (pressed || (async_button_pressed && !pressed)) {"
-    )
+    # 4. In button_wait_poll, trigger on release or hold > 300ms
+    target_poll = """    else if (async_button_pressed && !pressed) {
+        result = BUTTON_EV_PRESSED;
+    }"""
+    replacement_poll = """    else if (async_button_pressed && !pressed) {
+        result = BUTTON_EV_PRESSED;
+    }
+    else if (async_button_pressed && (async_button_started + 300 < now) && pressed) {
+        result = BUTTON_EV_PRESSED;
+    }"""
+    content = content.replace(target_poll, replacement_poll, 1)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)

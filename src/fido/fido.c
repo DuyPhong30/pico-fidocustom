@@ -569,30 +569,21 @@ uint32_t user_present_time_limit = 0;
 
 static bool check_user_presence_internal(uint32_t timeout_seconds, bool honor_force) {
     (void) honor_force;
-    if (user_present_time_limit == 0 || user_present_time_limit + TRANSPORT_TIME_LIMIT < board_millis()) {
-        bool previous_force_button_wait = force_button_wait;
-#ifdef FORCE_BUTTON_WAIT
-        if (honor_force) {
-            force_button_wait = true;
-        }
-#endif
-        int ret = wait_button_pressed_timeout(timeout_seconds);
-        force_button_wait = previous_force_button_wait;
-        if (ret > 0) {
-            return false;
-        }
-        //user_present_time_limit = board_millis();
+    (void) timeout_seconds;
+    int ret = wait_button_pressed_timeout(30);
+    if (ret > 0) {
+        return false;
     }
     return true;
 }
 
 bool check_user_presence(void) {
-    return check_user_presence_internal(button_timeout_seconds(), true);
+    return check_user_presence_internal(30, true);
 }
 
 bool check_user_presence_for_credential(bool require_button) {
-    uint32_t timeout_seconds = require_button ? button_timeout_seconds() : 0;
-    return check_user_presence_internal(timeout_seconds, false);
+    (void)require_button;
+    return check_user_presence_internal(30, true);
 }
 
 void fido_led_3_blinks(void) {
