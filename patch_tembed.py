@@ -73,7 +73,7 @@ static volatile uint32_t g_wait_start_tick = 0;
 static int s_last_beam_y = -1;
 
 static uint8_t hud_buf[HUD_W * HUD_H * 2];
-static uint8_t eye_buf[64 * 46 * 2];
+static uint8_t eye_buf[64 * 50 * 2];
 
 static void lcd_cmd(uint8_t cmd) {
     gpio_set_level(TFT_DC, 0);
@@ -444,7 +444,7 @@ static void tembed_render_fourze_idle(uint32_t frame) {
     st7789_set_window(FOURZE_EYE_X, FOURZE_EYE_Y, FOURZE_EYE_X + FOURZE_EYE_W - 1, FOURZE_EYE_Y + FOURZE_EYE_H - 1);
     lcd_data(eye_buf, FOURZE_EYE_W * FOURZE_EYE_H * 2);
 
-    // 2. Rocket thruster flicker at exhaust (X=86..89, Y=244..247)
+    // 2. Rocket thruster flicker at exhaust (X=83..86, Y=244..247)
     static const uint16_t flame_colors[4] = { 0xFD20, 0xFFE0, 0xFA00, 0xFFFF };
     uint8_t flame_buf[4 * 4 * 2];
     uint16_t flame_col = flame_colors[(frame + (frame / 2)) % 4];
@@ -454,7 +454,7 @@ static void tembed_render_fourze_idle(uint32_t frame) {
         flame_buf[i * 2]     = f_hi;
         flame_buf[i * 2 + 1] = f_lo;
     }
-    st7789_set_window(86, 244, 89, 247);
+    st7789_set_window(83, 244, 86, 247);
     lcd_data(flame_buf, sizeof(flame_buf));
 
     // 3. Cosmic starlight particles in left & right space margins
@@ -534,9 +534,9 @@ static void tembed_render_faiz_complete(uint32_t frame) {
     uint8_t shi = (spark_col >> 8) & 0xFF;
     uint8_t slo = spark_col & 0xFF;
     for (int i = 0; i < 4; i++) { spk[i * 2] = shi; spk[i * 2 + 1] = slo; }
-    st7789_set_window(52, 222, 53, 223);
+    st7789_set_window(45, 222, 46, 223);
     lcd_data(spk, sizeof(spk));
-    st7789_set_window(116, 222, 117, 223);
+    st7789_set_window(123, 222, 124, 223);
     lcd_data(spk, sizeof(spk));
 }
 
@@ -737,8 +737,9 @@ TEMBED_AUDIO_H = """/*
 
 typedef enum {
     TEMBED_SOUND_NONE = 0,
+    TEMBED_SOUND_BOOT,      // Fourze "3, 2, 1!" countdown startup chime
     TEMBED_SOUND_WAITING,   // Faiz "Standing By" long continuous sound loop
-    TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!" + Henshin burst
+    TEMBED_SOUND_CONFIRMED, // Faiz "COMPLETE!" speech
     TEMBED_SOUND_TIMEOUT,   // Buzzer Error
     TEMBED_SOUND_STOP
 } tembed_sound_t;
@@ -872,6 +873,11 @@ static void tembed_audio_task(void *pvParameters) {
         bool loop = false;
 
         switch (cur_sound) {
+            case TEMBED_SOUND_BOOT:
+                pcm = sound_boot_pcm;
+                total_samples = sound_boot_samples;
+                loop = false;
+                break;
             case TEMBED_SOUND_WAITING:
                 pcm = sound_waiting_pcm;
                 total_samples = sound_waiting_samples;
@@ -909,7 +915,8 @@ static void tembed_audio_task(void *pvParameters) {
 
             size_t chunk = (total_samples - pos > 128) ? 128 : (total_samples - pos);
             for (size_t i = 0; i < chunk; i++) {
-                int16_t s16 = ((int16_t)pcm[pos + i] - 128) << 8;
+                int32_t raw_val = (int32_t)pcm[pos + i] - 128; // -128 .. +127
+                int16_t s16 = (int16_t)((raw_val * 256 * 20) / 100); // 20% volume as requested
                 stereo_buf[i * 2]     = s16;
                 stereo_buf[i * 2 + 1] = s16;
             }
@@ -938,7 +945,7 @@ static void tembed_audio_task(void *pvParameters) {
             // Loop again
             continue;
         } else {
-            // One-shot sound finished (CONFIRMED or TIMEOUT)
+            // One-shot sound finished (BOOT, CONFIRMED, or TIMEOUT)
             tembed_i2s_silence(256);
             cur_sound = TEMBED_SOUND_NONE;
         }
@@ -967,8 +974,6 @@ static int tembed_audio_signal_cb(signal_code_t code, void *data) {
             tembed_audio_play(TEMBED_SOUND_TIMEOUT);
             break;
         case SIGNAL_USER_PRESENCE_CANCELLED:
-        case SIGNAL_BOOT:
-        case SIGNAL_USB_MOUNTED:
             tembed_audio_play(TEMBED_SOUND_STOP);
             break;
         default:
@@ -981,12 +986,13 @@ void tembed_audio_start(void) {
     audio_queue = xQueueCreate(8, sizeof(tembed_sound_t));
     xTaskCreate(tembed_audio_task, "tembed_audio", 4096, NULL, 2, NULL);
 
+    // Play Fourze 3-2-1 boot chime on startup
+    tembed_audio_play(TEMBED_SOUND_BOOT);
+
     signal_add(SIGNAL_USER_PRESENCE_REQUEST, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_COMPLETED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_TIMEOUT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
     signal_add(SIGNAL_USER_PRESENCE_CANCELLED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
-    signal_add(SIGNAL_BOOT, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
-    signal_add(SIGNAL_USB_MOUNTED, SIGNAL_FLAG_NONE, tembed_audio_signal_cb);
 }
 """
 

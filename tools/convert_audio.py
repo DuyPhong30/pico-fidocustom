@@ -31,17 +31,21 @@ def convert_clip(input_mp3, start_sec=None, duration_sec=None):
 
 def main():
     print("Converting Kamen Rider audio files to tembed_audio_data.h...")
+    boot_mp3 = os.path.join(SOUNDS_DIR, "boot.mp3")
     waiting_mp3 = os.path.join(SOUNDS_DIR, "waiting.mp3")
     confirmed_mp3 = os.path.join(SOUNDS_DIR, "confirmed.mp3")
     timeout_mp3 = os.path.join(SOUNDS_DIR, "timeout.mp3")
 
-    # 1. Waiting: Long continuous Faiz "Standing By" and electronic standby rhythm (~8.3s)
+    # 1. Boot: Kamen Rider Fourze 3-2-1 startup chime (~1.5s)
+    raw_boot = convert_clip(boot_mp3)
+
+    # 2. Waiting: Long continuous Faiz "Standing By" and electronic standby rhythm (~8.3s)
     raw_waiting = convert_clip(waiting_mp3)
 
-    # 2. Confirmed: Faiz "COMPLETE!" + Henshin photon stream burst (~2.8s)
-    raw_confirmed = convert_clip(confirmed_mp3, start_sec=1.5, duration_sec=2.8)
+    # 3. Confirmed: Faiz clear "COMPLETE!" voice announcement (~2.0s)
+    raw_confirmed = convert_clip(confirmed_mp3)
 
-    # 3. Timeout: Buzzer Error (~1.5s)
+    # 4. Timeout: Buzzer Error (~1.5s)
     raw_timeout = convert_clip(timeout_mp3, duration_sec=1.5)
 
     with open(OUTPUT_HEADER, "w", encoding="utf-8") as f:
@@ -50,6 +54,7 @@ def main():
         f.write("#include <stdint.h>\n#include <stddef.h>\n\n")
 
         for name, data in [
+            ("sound_boot", raw_boot),
             ("sound_waiting", raw_waiting),
             ("sound_confirmed", raw_confirmed),
             ("sound_timeout", raw_timeout)
@@ -62,7 +67,7 @@ def main():
             f.write(f"}};\n#define {name}_samples {len(data)}\n\n")
 
         f.write("#endif // _TEMBED_AUDIO_DATA_H_\n")
-    print(f"Successfully generated {OUTPUT_HEADER} with {len(raw_waiting)} waiting bytes, {len(raw_confirmed)} confirmed bytes, {len(raw_timeout)} timeout bytes.")
+    print(f"Successfully generated {OUTPUT_HEADER} with {len(raw_boot)} boot bytes, {len(raw_waiting)} waiting bytes, {len(raw_confirmed)} confirmed bytes, {len(raw_timeout)} timeout bytes.")
 
 if __name__ == "__main__":
     main()

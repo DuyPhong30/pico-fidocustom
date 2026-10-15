@@ -5,6 +5,9 @@
 #include <stddef.h>
 
 /* Default placeholder - will be generated with Kamen Rider audio in CI build */
+static const uint8_t sound_boot_pcm[1] = {128};
+#define sound_boot_samples 0
+
 static const uint8_t sound_waiting_pcm[1] = {128};
 #define sound_waiting_samples 0
 
