@@ -907,16 +907,20 @@ static void tembed_audio_task(void *pvParameters) {
 
         while (pos < total_samples) {
             tembed_sound_t req;
-            if (xQueueReceive(audio_queue, &req, 0) == pdTRUE) {
-                cur_sound = req;
-                switched = true;
-                break; // Switch to new sound immediately!
+            if (cur_sound != TEMBED_SOUND_CONFIRMED && xQueueReceive(audio_queue, &req, 0) == pdTRUE) {
+                if (cur_sound == TEMBED_SOUND_BOOT && req == TEMBED_SOUND_STOP) {
+                    // Ignore stop for boot chime so it plays to completion
+                } else {
+                    cur_sound = req;
+                    switched = true;
+                    break; // Switch to new sound immediately!
+                }
             }
 
             size_t chunk = (total_samples - pos > 128) ? 128 : (total_samples - pos);
             for (size_t i = 0; i < chunk; i++) {
                 int32_t raw_val = (int32_t)pcm[pos + i] - 128; // -128 .. +127
-                int16_t s16 = (int16_t)((raw_val * 256 * 20) / 100); // 20% volume as requested
+                int16_t s16 = (int16_t)((raw_val * 256 * 50) / 100); // 50% volume as requested
                 stereo_buf[i * 2]     = s16;
                 stereo_buf[i * 2 + 1] = s16;
             }
