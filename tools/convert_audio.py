@@ -11,9 +11,16 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOUNDS_DIR = os.path.join(ROOT, "sounds")
 OUTPUT_HEADER = os.path.join(ROOT, "tembed_audio_data.h")
 
+def get_ffmpeg_cmd():
+    local_ffmpeg = os.path.join(ROOT, "ffmpeg.exe")
+    if os.path.exists(local_ffmpeg):
+        return local_ffmpeg
+    return "ffmpeg"
+
 def convert_clip(input_mp3, start_sec=None, duration_sec=None):
     raw_out = input_mp3 + ".raw"
-    cmd = ["ffmpeg", "-y"]
+    ffmpeg_bin = get_ffmpeg_cmd()
+    cmd = [ffmpeg_bin, "-y"]
     if start_sec is not None:
         cmd.extend(["-ss", str(start_sec)])
     cmd.extend(["-i", input_mp3, "-ar", "16000", "-ac", "1", "-f", "u8"])
@@ -36,14 +43,16 @@ def main():
     confirmed_mp3 = os.path.join(SOUNDS_DIR, "confirmed.mp3")
     timeout_mp3 = os.path.join(SOUNDS_DIR, "timeout.mp3")
 
-    # 1. Boot: Kamen Rider Fourze 3-2-1 startup chime (~1.5s)
-    raw_boot = convert_clip(boot_mp3)
+    # 1. Boot: Kamen Rider W (Double) transformation music ("nhạc mở máy")
+    # From W Henshin MP3: start at 5.48s (after memories insertion, right into "Cyclone! Joker!" + Henshin fanfare)
+    raw_boot = convert_clip(boot_mp3, start_sec=5.48, duration_sec=4.5)
 
     # 2. Waiting: Long continuous Faiz "Standing By" and electronic standby rhythm (~8.3s)
     raw_waiting = convert_clip(waiting_mp3)
 
-    # 3. Confirmed: Faiz clear "COMPLETE!" voice announcement (~2.0s)
-    raw_confirmed = convert_clip(confirmed_mp3)
+    # 3. Confirmed: Faiz clear "COMPLETE!" voice announcement + photon stream burst
+    # From Faiz Henshin MP3: start at 7.75s (exact beginning of "COMPLETE!" announcement)
+    raw_confirmed = convert_clip(confirmed_mp3, start_sec=7.75, duration_sec=2.8)
 
     # 4. Timeout: Buzzer Error (~1.5s)
     raw_timeout = convert_clip(timeout_mp3, duration_sec=1.5)
