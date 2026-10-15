@@ -17,16 +17,17 @@ def get_ffmpeg_cmd():
         return local_ffmpeg
     return "ffmpeg"
 
-def convert_clip(input_mp3, start_sec=None, duration_sec=None):
+def convert_clip(input_mp3, start_sec=None, duration_sec=None, volume=None):
     raw_out = input_mp3 + ".raw"
     ffmpeg_bin = get_ffmpeg_cmd()
-    cmd = [ffmpeg_bin, "-y"]
+    cmd = [ffmpeg_bin, "-y", "-i", input_mp3]
     if start_sec is not None:
         cmd.extend(["-ss", str(start_sec)])
-    cmd.extend(["-i", input_mp3, "-ar", "16000", "-ac", "1", "-f", "u8"])
     if duration_sec is not None:
         cmd.extend(["-t", str(duration_sec)])
-    cmd.append(raw_out)
+    if volume is not None:
+        cmd.extend(["-af", f"volume={volume}"])
+    cmd.extend(["-ar", "16000", "-ac", "1", "-f", "u8", raw_out])
 
     print("Running:", " ".join(cmd))
     subprocess.check_call(cmd)
@@ -43,16 +44,16 @@ def main():
     confirmed_mp3 = os.path.join(SOUNDS_DIR, "confirmed.mp3")
     timeout_mp3 = os.path.join(SOUNDS_DIR, "timeout.mp3")
 
-    # 1. Boot: Kamen Rider W (Double) transformation music ("nhạc mở máy")
-    # From W Henshin MP3: start at 5.48s (after memories insertion, right into "Cyclone! Joker!" + Henshin fanfare)
-    raw_boot = convert_clip(boot_mp3, start_sec=5.48, duration_sec=4.5)
+    # 1. Boot: Kamen Rider W (Double) transformation music ("đoạn nhạc đằng sau")
+    # From W Henshin MP3: start at 6.21s (exact start of the iconic techno synth fanfare)
+    raw_boot = convert_clip(boot_mp3, start_sec=6.21, duration_sec=4.5, volume=1.4)
 
     # 2. Waiting: Long continuous Faiz "Standing By" and electronic standby rhythm (~8.3s)
     raw_waiting = convert_clip(waiting_mp3)
 
     # 3. Confirmed: Faiz clear "COMPLETE!" voice announcement + photon stream burst
-    # From Faiz Henshin MP3: start at 7.75s (exact beginning of "COMPLETE!" announcement)
-    raw_confirmed = convert_clip(confirmed_mp3, start_sec=7.75, duration_sec=2.8)
+    # From Faiz Henshin MP3: start at 8.40s (exact millisecond of "COMPLETE!" announcement, zero phone clicks)
+    raw_confirmed = convert_clip(confirmed_mp3, start_sec=8.40, duration_sec=2.8, volume=1.8)
 
     # 4. Timeout: Buzzer Error (~1.5s)
     raw_timeout = convert_clip(timeout_mp3, duration_sec=1.5)

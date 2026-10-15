@@ -848,6 +848,8 @@ static void tembed_i2s_silence(size_t samples) {
     }
 }
 
+static volatile tembed_sound_t s_active_sound = TEMBED_SOUND_NONE;
+
 static void tembed_audio_task(void *pvParameters) {
     (void)pvParameters;
     tembed_i2s_init();
@@ -866,6 +868,10 @@ static void tembed_audio_task(void *pvParameters) {
             tembed_i2s_silence(128);
             cur_sound = TEMBED_SOUND_NONE;
             continue;
+        }
+
+        if (cur_sound == TEMBED_SOUND_CONFIRMED) {
+            s_active_sound = TEMBED_SOUND_CONFIRMED;
         }
 
         const uint8_t *pcm = NULL;
@@ -920,7 +926,7 @@ static void tembed_audio_task(void *pvParameters) {
             size_t chunk = (total_samples - pos > 128) ? 128 : (total_samples - pos);
             for (size_t i = 0; i < chunk; i++) {
                 int32_t raw_val = (int32_t)pcm[pos + i] - 128; // -128 .. +127
-                int16_t s16 = (int16_t)((raw_val * 256 * 50) / 100); // 50% volume as requested
+                int16_t s16 = (int16_t)((raw_val * 256 * 35) / 100); // 35% volume as requested
                 stereo_buf[i * 2]     = s16;
                 stereo_buf[i * 2 + 1] = s16;
             }
@@ -951,18 +957,36 @@ static void tembed_audio_task(void *pvParameters) {
         } else {
             // One-shot sound finished (BOOT, CONFIRMED, or TIMEOUT)
             tembed_i2s_silence(256);
+            if (cur_sound == TEMBED_SOUND_CONFIRMED) {
+                s_active_sound = TEMBED_SOUND_NONE;
+            }
             cur_sound = TEMBED_SOUND_NONE;
         }
     }
 }
 
 void tembed_audio_play(tembed_sound_t sound) {
-    if (audio_queue) {
-        if (sound == TEMBED_SOUND_CONFIRMED || sound == TEMBED_SOUND_STOP) {
-            xQueueReset(audio_queue);
-        }
-        xQueueSend(audio_queue, &sound, 0);
+    if (!audio_queue) return;
+
+    // COMPLETE sound must NEVER be cancelled by STOP
+    if (s_active_sound == TEMBED_SOUND_CONFIRMED && sound == TEMBED_SOUND_STOP) {
+        return;
     }
+
+    if (sound == TEMBED_SOUND_CONFIRMED) {
+        s_active_sound = TEMBED_SOUND_CONFIRMED;
+        xQueueReset(audio_queue);
+        xQueueSend(audio_queue, &sound, 0);
+        return;
+    }
+
+    if (sound == TEMBED_SOUND_STOP) {
+        xQueueReset(audio_queue);
+        xQueueSend(audio_queue, &sound, 0);
+        return;
+    }
+
+    xQueueSend(audio_queue, &sound, 0);
 }
 
 static int tembed_audio_signal_cb(signal_code_t code, void *data) {
