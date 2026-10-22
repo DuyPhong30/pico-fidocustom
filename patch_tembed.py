@@ -1071,7 +1071,14 @@ def patch_main_c():
         content = f.read()
 
     if "tembed_audio_start" in content:
-        print("main.c already patched with audio.")
+        if "zw111_init" not in content:
+            content = content.replace(
+                "tembed_audio_start();",
+                "tembed_audio_start();\n    extern bool zw111_init(void);\n    zw111_init();"
+            )
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("Patched main.c with zw111_init.")
         return
 
     if "tembed_display_start();" in content:

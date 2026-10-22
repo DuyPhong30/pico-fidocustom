@@ -157,38 +157,76 @@ static TaskHandle_t s_knob_task_handle = NULL;
 
 static void zw111_knob_task(void *pvParameters) {
     (void)pvParameters;
+    uint32_t click_count = 0;
+    uint32_t last_click_time = 0;
+    bool last_state = false; // false = unpressed (HIGH), true = pressed (LOW)
+
     while (1) {
         // Only monitor when in IDLE (not waiting for FIDO2 authentication)
-        if (!req_button_pending && s_connected) {
-            if (gpio_get_level(GPIO_NUM_0) == 0) {
-                TickType_t start_tick = xTaskGetTickCount();
-                bool deleted = false;
+        if (!req_button_pending) {
+            bool current_state = (gpio_get_level(GPIO_NUM_0) == 0); // true if knob clicked down
+            uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
 
+            // Detect button press edge: unpressed -> pressed
+            if (current_state && !last_state) {
+                TickType_t press_start = xTaskGetTickCount();
+                bool long_press_handled = false;
+
+                // Loop while held down
                 while (gpio_get_level(GPIO_NUM_0) == 0) {
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                    uint32_t held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - start_tick);
+                    vTaskDelay(pdMS_TO_TICKS(40));
+                    uint32_t held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - press_start);
 
-                    // If held for 10 seconds: Delete all enrolled fingerprints!
+                    // If held for 10 seconds: Delete all templates!
                     if (held_ms >= 10000) {
                         zw111_delete_all();
-                        deleted = true;
+                        long_press_handled = true;
+                        click_count = 0;
                         while (gpio_get_level(GPIO_NUM_0) == 0) {
-                            vTaskDelay(pdMS_TO_TICKS(50));
+                            vTaskDelay(pdMS_TO_TICKS(40));
                         }
                         break;
                     }
                 }
 
-                if (!deleted) {
-                    uint32_t total_held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - start_tick);
-                    if (total_held_ms >= 3000) {
-                        // Held between 3s and 10s: Enter enrollment mode!
+                if (!long_press_handled) {
+                    uint32_t total_held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - press_start);
+
+                    if (total_held_ms >= 2500) {
+                        // Long press >= 2.5s: Trigger enrollment!
+                        click_count = 0;
+                        ESP_LOGI(TAG, "Knob long press detected -> starting enrollment");
                         zw111_enroll_finger();
+                    } else if (total_held_ms >= 25) {
+                        // Valid click (> 25ms debounce, < 2.5s)
+                        if (now - last_click_time < 750) {
+                            click_count++;
+                        } else {
+                            click_count = 1;
+                        }
+                        last_click_time = now;
+                        ESP_LOGI(TAG, "Knob click #%u", click_count);
+
+                        if (click_count >= 3) {
+                            click_count = 0;
+                            // TRIPLE CLICK DETECTED!
+                            ESP_LOGI(TAG, "Knob TRIPLE-CLICK detected -> starting enrollment!");
+                            zw111_enroll_finger();
+                        }
                     }
                 }
             }
+            last_state = current_state;
+
+            // Reset click count if timeout (> 800ms since last click)
+            if (click_count > 0 && (now - last_click_time > 800)) {
+                click_count = 0;
+            }
+        } else {
+            click_count = 0;
+            last_state = false;
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -216,6 +254,9 @@ bool zw111_init(void) {
     uart_set_rx_timeout(ZW111_UART_NUM, 2);
     uart_set_pin(ZW111_UART_NUM, ZW111_TX_PIN, ZW111_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
+    // Give ZW111 internal MCU 250ms to boot up completely
+    vTaskDelay(pdMS_TO_TICKS(250));
+
     s_initialized = true;
 
     // Verify sensor presence via PS_VfyPwd (0x13)
@@ -223,12 +264,12 @@ bool zw111_init(void) {
     uint8_t confirm = 0xFF;
     bool ok = false;
 
-    for (int attempt = 0; attempt < 3; attempt++) {
+    for (int attempt = 0; attempt < 5; attempt++) {
         if (zw111_send_command(0x13, pwd, sizeof(pwd), &confirm, NULL, NULL, 150) && confirm == 0x00) {
             ok = true;
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     s_connected = ok;
@@ -238,10 +279,11 @@ bool zw111_init(void) {
         zw111_refresh_template_count();
         // Turn off LED ring by default in idle
         zw111_set_led(4, 0, 0, 0);
+    }
 
-        if (s_knob_task_handle == NULL) {
-            xTaskCreate(zw111_knob_task, "zw_knob", 3072, NULL, 3, &s_knob_task_handle);
-        }
+    // Always create knob task to monitor clicks and holds
+    if (s_knob_task_handle == NULL) {
+        xTaskCreate(zw111_knob_task, "zw_knob", 3072, NULL, 3, &s_knob_task_handle);
     }
 
     return s_connected;
