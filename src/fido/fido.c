@@ -45,6 +45,10 @@
 #include "crypto_utils.h"
 #include "otp.h"
 #include "event.h"
+#ifdef ESP_PLATFORM
+#include "driver/gpio.h"
+#include "zw111.h"
+#endif
 
 extern char *rp_id;
 extern size_t rp_id_len;
@@ -598,29 +602,51 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    // Step 2: Strictly wait for physical click of the knob (LOW == 0)
-    // Debounced: must stay LOW for >= 40ms (real human click)
+    // Initialize ZW111 fingerprint sensor & light up sensor ring in breathing Cyan aura
+    zw111_init();
+    zw111_set_led(1, 6, 6, 0); // 1 = Breathing, color 6 = Cyan
+
+    // Step 2: Wait for ZW111 Fingerprint Scan OR rotary knob physical click
     uint32_t press_start = 0;
-    bool clicked = false;
+    bool authorized = false;
+    uint32_t last_fp_poll = 0;
 
     while (board_millis() < deadline) {
         if (cancel_button) {
             break;
         }
 
-        int level = gpio_get_level(GPIO_NUM_0);
         uint32_t now = board_millis();
 
+        // 1. Poll ZW111 Fingerprint Sensor every 40ms
+        if (now - last_fp_poll >= 40) {
+            last_fp_poll = now;
+            zw111_status_t fp_stat = zw111_check_presence();
+            if (fp_stat == ZW111_STATE_MATCH_CONFIRMED || fp_stat == ZW111_STATE_TOUCH_CONFIRMED) {
+                // Biometric scan confirmed! Steady Green on ZW111 ring!
+                zw111_set_led(3, 2, 2, 0); // Steady Green
+                authorized = true;
+                break;
+            } else if (fp_stat == ZW111_STATE_MISMATCH) {
+                // Wrong finger: Flash Red 2 times, then resume breathing Cyan
+                zw111_set_led(2, 1, 1, 2);
+                vTaskDelay(pdMS_TO_TICKS(250));
+                zw111_set_led(1, 6, 6, 0);
+            }
+        }
+
+        // 2. Rotary knob button fallback (GPIO 0)
+        int level = gpio_get_level(GPIO_NUM_0);
         if (level == 0) {
             if (press_start == 0) {
                 press_start = now;
             } else if (now - press_start >= 40) {
                 // Genuine click confirmed!
-                // Wait until knob is released or held for up to 350ms
                 while (gpio_get_level(GPIO_NUM_0) == 0 && (board_millis() - press_start < 350)) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
-                clicked = true;
+                zw111_set_led(3, 2, 2, 0); // Steady Green
+                authorized = true;
                 break;
             }
         } else {
@@ -633,15 +659,22 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
     req_button_pending = false;
 
     if (cancel_button) {
+        zw111_set_led(4, 0, 0, 0); // Turn off sensor LED
         signal_emit(SIGNAL_USER_PRESENCE_CANCELLED);
         return 2;
     }
-    if (clicked) {
+    if (authorized) {
         signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
-        return 0; // Success!
+        // Keep green LED lit briefly during Faiz Complete sound
+        vTaskDelay(pdMS_TO_TICKS(600));
+        zw111_set_led(4, 0, 0, 0);
+        return 0; // Success! Faiz COMPLETE screen & sound!
     }
 
     // 30s timeout! Screen shows OOO, LED turns solid red 2s, error sound
+    zw111_set_led(3, 1, 1, 0); // Solid Red
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    zw111_set_led(4, 0, 0, 0);
     signal_emit(SIGNAL_USER_PRESENCE_TIMEOUT);
     return 1; // Timeout!
 #else

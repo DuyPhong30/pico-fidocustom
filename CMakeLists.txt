@@ -98,6 +98,7 @@ list(APPEND SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/object_provider.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/resident_container.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/files.c
+    ${CMAKE_CURRENT_LIST_DIR}/src/fido/zw111.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cmd_register.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cmd_authenticate.c
     ${CMAKE_CURRENT_LIST_DIR}/src/fido/cmd_version.c
