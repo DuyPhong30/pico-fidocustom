@@ -575,7 +575,7 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
 
     // Configure GPIO 0 with internal pullup
     gpio_config_t btn_cfg = {
-        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+        .pin_bit_mask = (1ULL << GPIO_NUM_0) | (1ULL << GPIO_NUM_6),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -590,7 +590,7 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
     // Step 1: Wait until button is observed in RELEASED (HIGH == 1) state for >= 50ms before arming
     uint32_t unpressed_start = 0;
     while (board_millis() < deadline && !cancel_button) {
-        if (gpio_get_level(GPIO_NUM_0) == 1) {
+        if (gpio_get_level(GPIO_NUM_0) == 1 && gpio_get_level(GPIO_NUM_6) == 1) {
             if (unpressed_start == 0) {
                 unpressed_start = board_millis();
             } else if (board_millis() - unpressed_start >= 50) {
@@ -636,13 +636,13 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
         }
 
         // 2. Rotary knob button fallback (GPIO 0)
-        int level = gpio_get_level(GPIO_NUM_0);
+        int level = (gpio_get_level(GPIO_NUM_0) == 0 || gpio_get_level(GPIO_NUM_6) == 0) ? 0 : 1;
         if (level == 0) {
             if (press_start == 0) {
                 press_start = now;
             } else if (now - press_start >= 40) {
                 // Genuine click confirmed!
-                while (gpio_get_level(GPIO_NUM_0) == 0 && (board_millis() - press_start < 350)) {
+                while ((gpio_get_level(GPIO_NUM_0) == 0 || gpio_get_level(GPIO_NUM_6) == 0) && (board_millis() - press_start < 350)) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 zw111_set_led(3, 2, 2, 0); // Steady Green

@@ -221,6 +221,10 @@ bool zw111_probe(void) {
     return false;
 }
 
+static inline bool is_user_button_pressed(void) {
+    return (gpio_get_level(GPIO_NUM_0) == 0) || (gpio_get_level(GPIO_NUM_6) == 0);
+}
+
 static void zw111_knob_task(void *pvParameters) {
     (void)pvParameters;
     uint32_t click_count = 0;
@@ -239,7 +243,7 @@ static void zw111_knob_task(void *pvParameters) {
 
         // Only monitor when in IDLE
         if (!req_button_pending) {
-            bool current_state = (gpio_get_level(GPIO_NUM_0) == 0);
+            bool current_state = is_user_button_pressed();
 
             // Detect button press edge: unpressed -> pressed
             if (current_state && !last_state) {
@@ -247,7 +251,7 @@ static void zw111_knob_task(void *pvParameters) {
                 bool long_press_handled = false;
 
                 // Loop while held down
-                while (gpio_get_level(GPIO_NUM_0) == 0) {
+                while (is_user_button_pressed()) {
                     vTaskDelay(pdMS_TO_TICKS(40));
                     uint32_t held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - press_start);
 
@@ -256,7 +260,7 @@ static void zw111_knob_task(void *pvParameters) {
                         zw111_delete_all();
                         long_press_handled = true;
                         click_count = 0;
-                        while (gpio_get_level(GPIO_NUM_0) == 0) {
+                        while (is_user_button_pressed()) {
                             vTaskDelay(pdMS_TO_TICKS(40));
                         }
                         break;
@@ -307,6 +311,15 @@ static void zw111_knob_task(void *pvParameters) {
 }
 
 bool zw111_init(void) {
+    // Configure buttons: GPIO 0 (Rotary knob) and GPIO 6 (Side button)
+    gpio_config_t btn_cfg = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_0) | (1ULL << GPIO_NUM_6),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&btn_cfg);
     if (s_initialized && s_connected) {
         return true;
     }
