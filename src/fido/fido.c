@@ -622,7 +622,7 @@ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
         if (now - last_fp_poll >= 40) {
             last_fp_poll = now;
             zw111_status_t fp_stat = zw111_check_presence();
-            if (fp_stat == ZW111_STATE_MATCH_CONFIRMED || fp_stat == ZW111_STATE_TOUCH_CONFIRMED) {
+            if (fp_stat == ZW111_STATE_MATCH_CONFIRMED) {
                 // Biometric scan confirmed! Steady Green on ZW111 ring!
                 zw111_set_led(3, 2, 2, 0); // Steady Green
                 authorized = true;

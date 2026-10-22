@@ -396,30 +396,27 @@ zw111_status_t zw111_check_presence(void) {
 
     if (confirm == 0x00) {
         // Finger placed and image acquired!
-        if (s_template_count > 0) {
-            // Generate character file into buffer 1
-            uint8_t gen_params[1] = { 0x01 };
-            uint8_t gen_confirm = 0xFF;
-            if (zw111_send_command(0x02, gen_params, 1, &gen_confirm, NULL, NULL, 800) && gen_confirm == 0x00) {
-                // Search template library (buffer 1, start 0, count 255)
-                uint8_t search_params[5] = { 0x01, 0x00, 0x00, 0x00, 0xFF };
-                uint8_t search_data[4];
-                size_t search_len = sizeof(search_data);
-                uint8_t search_confirm = 0xFF;
-                if (zw111_send_command(0x04, search_params, 5, &search_confirm, search_data, &search_len, 800) && search_confirm == 0x00) {
-                    uint16_t slot = ((uint16_t)search_data[0] << 8) | search_data[1];
-                    uint16_t score = ((uint16_t)search_data[2] << 8) | search_data[3];
-                    ESP_LOGI(TAG, "Biometric MATCH: slot=%u score=%u", slot, score);
-                    return ZW111_STATE_MATCH_CONFIRMED;
-                }
+        // Always extract minutiae and search template library!
+        uint8_t gen_params[1] = { 0x01 };
+        uint8_t gen_confirm = 0xFF;
+        if (zw111_send_command(0x02, gen_params, 1, &gen_confirm, NULL, NULL, 800) && gen_confirm == 0x00) {
+            // Search template library (buffer 1, start page 0, count 255)
+            uint8_t search_params[5] = { 0x01, 0x00, 0x00, 0x00, 0xFF };
+            uint8_t search_data[4];
+            size_t search_len = sizeof(search_data);
+            uint8_t search_confirm = 0xFF;
+            if (zw111_send_command(0x04, search_params, 5, &search_confirm, search_data, &search_len, 800) && search_confirm == 0x00) {
+                uint16_t slot = (search_len >= 2) ? (((uint16_t)search_data[0] << 8) | search_data[1]) : 0;
+                uint16_t score = (search_len >= 4) ? (((uint16_t)search_data[2] << 8) | search_data[3]) : 0;
+                ESP_LOGI(TAG, "Biometric MATCH: slot=%u score=%u", slot, score);
+                return ZW111_STATE_MATCH_CONFIRMED;
+            } else {
+                ESP_LOGW(TAG, "Biometric MISMATCH: search_confirm=0x%02x", search_confirm);
             }
-            ESP_LOGW(TAG, "Biometric MISMATCH (unrecognized finger)");
-            return ZW111_STATE_MISMATCH;
         } else {
-            // No templates enrolled: Any valid finger touch fulfills User Presence!
-            ESP_LOGI(TAG, "User Presence Touch CONFIRMED (no templates enrolled)");
-            return ZW111_STATE_TOUCH_CONFIRMED;
+            ESP_LOGW(TAG, "Biometric PS_GenChar failed: gen_confirm=0x%02x", gen_confirm);
         }
+        return ZW111_STATE_MISMATCH;
     }
 
     return ZW111_STATE_NO_FINGER;
