@@ -269,27 +269,28 @@ static void zw111_knob_task(void *pvParameters) {
 
                 if (!long_press_handled) {
                     uint32_t total_held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - press_start);
+                    uint32_t release_time = pdTICKS_TO_MS(xTaskGetTickCount());
 
-                    if (total_held_ms >= 2000) {
-                        // Long press >= 2s: Trigger enrollment!
+                    if (total_held_ms >= 1800) {
+                        // Long press >= 1.8s: Trigger enrollment!
                         click_count = 0;
-                        ESP_LOGI(TAG, "Knob long press detected -> starting enrollment");
+                        ESP_LOGI(TAG, "Button long press (held %u ms) -> starting enrollment", (unsigned)total_held_ms);
                         if (!s_connected) zw111_probe();
                         zw111_enroll_finger();
-                    } else if (total_held_ms >= 20) {
-                        // Valid click (> 20ms debounce, < 2s)
-                        if (now - last_click_time < 750) {
+                    } else if (total_held_ms >= 25) {
+                        // Valid click (> 25ms debounce, < 1.8s)
+                        if (release_time - last_click_time < 1200) {
                             click_count++;
                         } else {
                             click_count = 1;
                         }
-                        last_click_time = now;
-                        ESP_LOGI(TAG, "Knob click #%u", click_count);
+                        last_click_time = release_time;
+                        ESP_LOGI(TAG, "Button click #%u (held %u ms)", (unsigned)click_count, (unsigned)total_held_ms);
 
                         if (click_count >= 3) {
                             click_count = 0;
                             // TRIPLE CLICK DETECTED!
-                            ESP_LOGI(TAG, "Knob TRIPLE-CLICK detected -> starting enrollment!");
+                            ESP_LOGI(TAG, "Button TRIPLE-CLICK detected -> starting enrollment!");
                             if (!s_connected) zw111_probe();
                             zw111_enroll_finger();
                         }
@@ -298,8 +299,9 @@ static void zw111_knob_task(void *pvParameters) {
             }
             last_state = current_state;
 
-            // Reset click count if timeout (> 800ms since last click)
-            if (click_count > 0 && (now - last_click_time > 800)) {
+            // Reset click count if timeout (> 1200ms since last click)
+            uint32_t cur_time = pdTICKS_TO_MS(xTaskGetTickCount());
+            if (click_count > 0 && (cur_time - last_click_time > 1200)) {
                 click_count = 0;
             }
         } else {
@@ -320,6 +322,7 @@ bool zw111_init(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&btn_cfg);
+
     if (s_initialized && s_connected) {
         return true;
     }
@@ -329,7 +332,7 @@ bool zw111_init(void) {
 
     // Always create knob task to monitor clicks and holds
     if (s_knob_task_handle == NULL) {
-        xTaskCreate(zw111_knob_task, "zw_knob", 3072, NULL, 3, &s_knob_task_handle);
+        xTaskCreate(zw111_knob_task, "zw_knob", 4096, NULL, 3, &s_knob_task_handle);
     }
 
     return s_connected;
@@ -352,7 +355,7 @@ uint16_t zw111_refresh_template_count(void) {
     uint8_t count_data[4];
     size_t count_len = sizeof(count_data);
 
-    if (zw111_send_command(0x1D, NULL, 0, &confirm, count_data, &count_len, 200) && confirm == 0x00) {
+    if (zw111_send_command(0x1D, NULL, 0, &confirm, count_data, &count_len, 300) && confirm == 0x00) {
         if (count_len >= 2) {
             s_template_count = ((uint16_t)count_data[0] << 8) | count_data[1];
             ESP_LOGI(TAG, "ZW111 Enrolled Templates: %u", s_template_count);
@@ -380,7 +383,7 @@ zw111_status_t zw111_check_presence(void) {
 
     // Send PS_GetImage (0x01)
     uint8_t confirm = 0xFF;
-    bool replied = zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 60);
+    bool replied = zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 100);
 
     if (!replied) {
         return ZW111_STATE_ERROR;
@@ -397,13 +400,13 @@ zw111_status_t zw111_check_presence(void) {
             // Generate character file into buffer 1
             uint8_t gen_params[1] = { 0x01 };
             uint8_t gen_confirm = 0xFF;
-            if (zw111_send_command(0x02, gen_params, 1, &gen_confirm, NULL, NULL, 150) && gen_confirm == 0x00) {
-                // Search template library (buffer 1, start 0, count 256)
-                uint8_t search_params[5] = { 0x01, 0x00, 0x00, 0x01, 0x00 };
+            if (zw111_send_command(0x02, gen_params, 1, &gen_confirm, NULL, NULL, 800) && gen_confirm == 0x00) {
+                // Search template library (buffer 1, start 0, count 255)
+                uint8_t search_params[5] = { 0x01, 0x00, 0x00, 0x00, 0xFF };
                 uint8_t search_data[4];
                 size_t search_len = sizeof(search_data);
                 uint8_t search_confirm = 0xFF;
-                if (zw111_send_command(0x04, search_params, 5, &search_confirm, search_data, &search_len, 250) && search_confirm == 0x00) {
+                if (zw111_send_command(0x04, search_params, 5, &search_confirm, search_data, &search_len, 800) && search_confirm == 0x00) {
                     uint16_t slot = ((uint16_t)search_data[0] << 8) | search_data[1];
                     uint16_t score = ((uint16_t)search_data[2] << 8) | search_data[3];
                     ESP_LOGI(TAG, "Biometric MATCH: slot=%u score=%u", slot, score);
@@ -427,7 +430,7 @@ int zw111_enroll_finger(void) {
         return -1;
     }
 
-    ESP_LOGI(TAG, "Starting Fingerprint Enrollment...");
+    ESP_LOGI(TAG, "=== Starting Fingerprint Enrollment ===");
 
     // Step 1: Steady Purple - Prompt user to place finger
     zw111_set_led(3, 5, 5, 0);
@@ -436,79 +439,97 @@ int zw111_enroll_finger(void) {
     uint8_t confirm = 0xFF;
     bool got_first = false;
 
-    // Wait up to 10s for first touch
-    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(10000)) {
-        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 80) && confirm == 0x00) {
+    // Wait up to 12s for first touch
+    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(12000)) {
+        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 150) && confirm == 0x00) {
             uint8_t p1[1] = { 0x01 };
-            if (zw111_send_command(0x02, p1, 1, &confirm, NULL, NULL, 200) && confirm == 0x00) {
+            if (zw111_send_command(0x02, p1, 1, &confirm, NULL, NULL, 1000) && confirm == 0x00) {
                 got_first = true;
+                ESP_LOGI(TAG, "1st scan captured and character buffer 1 generated!");
                 break;
+            } else {
+                ESP_LOGW(TAG, "PS_GenChar(1) failed (confirm=0x%02x)", confirm);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(80));
     }
 
     if (!got_first) {
+        ESP_LOGW(TAG, "Enrollment timed out waiting for 1st touch");
         zw111_set_led(2, 1, 1, 3); // Flash Red 3 times
+        vTaskDelay(pdMS_TO_TICKS(600));
+        zw111_set_led(4, 0, 0, 0);
         return -1;
     }
 
-    // Step 2: Flash Blue - Prompt user to lift finger
-    zw111_set_led(2, 4, 4, 3);
-    vTaskDelay(pdMS_TO_TICKS(600));
+    // Step 2: Flash Blue 2 times - Prompt user to LIFT finger
+    zw111_set_led(2, 4, 4, 2);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-    // Wait for finger to lift
+    // Wait for finger to lift (up to 6s)
     start = xTaskGetTickCount();
-    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(5000)) {
-        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 80) && confirm == 0x02) {
+    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(6000)) {
+        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 150) && confirm == 0x02) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(60));
     }
 
-    // Step 3: Steady Cyan - Prompt user to place same finger again
+    // Step 3: Steady Cyan - Prompt user to place SAME finger again
     zw111_set_led(3, 6, 6, 0);
     start = xTaskGetTickCount();
     bool got_second = false;
 
-    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(10000)) {
-        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 80) && confirm == 0x00) {
+    // Wait up to 12s for second touch
+    while ((xTaskGetTickCount() - start) < pdMS_TO_TICKS(12000)) {
+        if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 150) && confirm == 0x00) {
             uint8_t p2[1] = { 0x02 };
-            if (zw111_send_command(0x02, p2, 1, &confirm, NULL, NULL, 200) && confirm == 0x00) {
+            if (zw111_send_command(0x02, p2, 1, &confirm, NULL, NULL, 1000) && confirm == 0x00) {
                 got_second = true;
+                ESP_LOGI(TAG, "2nd scan captured and character buffer 2 generated!");
                 break;
+            } else {
+                ESP_LOGW(TAG, "PS_GenChar(2) failed (confirm=0x%02x)", confirm);
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+        vTaskDelay(pdMS_TO_TICKS(80));
     }
 
     if (!got_second) {
+        ESP_LOGW(TAG, "Enrollment timed out waiting for 2nd touch");
         zw111_set_led(2, 1, 1, 3); // Flash Red 3 times
+        vTaskDelay(pdMS_TO_TICKS(600));
+        zw111_set_led(4, 0, 0, 0);
         return -1;
     }
 
     // Step 4: Combine model (PS_RegModel 0x05)
-    if (!zw111_send_command(0x05, NULL, 0, &confirm, NULL, NULL, 300) || confirm != 0x00) {
-        ESP_LOGW(TAG, "RegModel failed (confirm=0x%02x)", confirm);
-        zw111_set_led(2, 1, 1, 3); // Flash Red
+    if (!zw111_send_command(0x05, NULL, 0, &confirm, NULL, NULL, 1000) || confirm != 0x00) {
+        ESP_LOGW(TAG, "RegModel failed (confirm=0x%02x) - prints did not match", confirm);
+        zw111_set_led(2, 1, 1, 3); // Flash Red 3 times
+        vTaskDelay(pdMS_TO_TICKS(600));
+        zw111_set_led(4, 0, 0, 0);
         return -1;
     }
 
-    // Step 5: Store template (PS_StoreChar 0x06) into next slot
-    uint16_t next_slot = s_template_count;
+    // Step 5: Store template (PS_StoreChar 0x06) into next slot (1 to 100, NEVER 0!)
+    uint16_t next_slot = (s_template_count < 100) ? (s_template_count + 1) : 1;
     uint8_t store_params[3] = { 0x01, (uint8_t)(next_slot >> 8), (uint8_t)(next_slot & 0xFF) };
-    if (!zw111_send_command(0x06, store_params, 3, &confirm, NULL, NULL, 300) || confirm != 0x00) {
-        ESP_LOGW(TAG, "StoreChar failed (confirm=0x%02x)", confirm);
-        zw111_set_led(2, 1, 1, 3);
+    if (!zw111_send_command(0x06, store_params, 3, &confirm, NULL, NULL, 1000) || confirm != 0x00) {
+        ESP_LOGW(TAG, "StoreChar failed (confirm=0x%02x) at slot %u", confirm, next_slot);
+        zw111_set_led(2, 1, 1, 3); // Flash Red 3 times
+        vTaskDelay(pdMS_TO_TICKS(600));
+        zw111_set_led(4, 0, 0, 0);
         return -1;
     }
 
-    s_template_count++;
-    ESP_LOGI(TAG, "Fingerprint enrolled successfully to slot %u!", next_slot);
+    // Refresh template count from sensor
+    zw111_refresh_template_count();
+    ESP_LOGI(TAG, "Fingerprint enrolled successfully to slot %u! Total templates: %u", next_slot, s_template_count);
 
     // Flash Green 3 times for victory!
     zw111_set_led(2, 2, 2, 3);
-    vTaskDelay(pdMS_TO_TICKS(800));
+    vTaskDelay(pdMS_TO_TICKS(1200));
     zw111_set_led(4, 0, 0, 0);
 
     return (int)next_slot;
@@ -521,12 +542,12 @@ bool zw111_delete_all(void) {
 
     uint8_t confirm = 0xFF;
     // PS_Empty (0x0d)
-    bool ok = zw111_send_command(0x0D, NULL, 0, &confirm, NULL, NULL, 500) && (confirm == 0x00);
+    bool ok = zw111_send_command(0x0D, NULL, 0, &confirm, NULL, NULL, 800) && (confirm == 0x00);
     if (ok) {
         s_template_count = 0;
         ESP_LOGI(TAG, "All fingerprint templates deleted.");
         zw111_set_led(2, 1, 1, 2); // Flash Red 2 times
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(600));
         zw111_set_led(4, 0, 0, 0);
     }
     return ok;
@@ -539,9 +560,10 @@ bool zw111_init(void) { return false; }
 bool zw111_is_connected(void) { return false; }
 uint16_t zw111_get_template_count(void) { return 0; }
 uint16_t zw111_refresh_template_count(void) { return 0; }
-bool zw111_set_led(uint8_t e, uint8_t s, uint8_t d, uint8_t c) { return false; }
-zw111_status_t zw111_check_presence(void) { return ZW111_STATE_NONE; }
+bool zw111_set_led(uint8_t effect, uint8_t start_color, uint8_t end_color, uint8_t cycles) { return false; }
+zw111_status_t zw111_check_presence(void) { return ZW111_STATE_NO_FINGER; }
 int zw111_enroll_finger(void) { return -1; }
 bool zw111_delete_all(void) { return false; }
+bool zw111_probe(void) { return false; }
 
 #endif
