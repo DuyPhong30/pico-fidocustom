@@ -154,18 +154,92 @@ static bool zw111_send_command(uint8_t instruction, const uint8_t *params, size_
 
 extern bool req_button_pending;
 static TaskHandle_t s_knob_task_handle = NULL;
+static int s_current_tx = 43;
+static int s_current_rx = 44;
+static int s_current_baud = 57600;
+
+bool zw111_probe(void) {
+    if (!s_initialized) {
+        uart_config_t uart_cfg = {
+            .baud_rate = 57600,
+            .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .source_clk = UART_SCLK_DEFAULT,
+        };
+
+        esp_err_t err = uart_driver_install(ZW111_UART_NUM, 1024, 0, 0, NULL, 0);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "uart_driver_install failed: %d", err);
+            return false;
+        }
+
+        uart_param_config(ZW111_UART_NUM, &uart_cfg);
+        uart_set_rx_timeout(ZW111_UART_NUM, 2);
+        s_initialized = true;
+    }
+
+    const int pin_pairs[][2] = {
+        { 43, 44 },  // Mode A: ESP32 TX=43, RX=44
+        { 44, 43 }   // Mode B: ESP32 TX=44, RX=43 (swapped)
+    };
+    const int bauds[] = { 57600, 115200 };
+
+    for (int p = 0; p < 2; p++) {
+        int tx = pin_pairs[p][0];
+        int rx = pin_pairs[p][1];
+
+        for (int b = 0; b < 2; b++) {
+            int baud = bauds[b];
+
+            uart_set_baudrate(ZW111_UART_NUM, baud);
+            uart_set_pin(ZW111_UART_NUM, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+            vTaskDelay(pdMS_TO_TICKS(30));
+
+            // Drain RX buffer
+            uint8_t drain[64];
+            while (uart_read_bytes(ZW111_UART_NUM, drain, sizeof(drain), 0) > 0) {}
+
+            // Send PS_GetImage (0x01) probe
+            uint8_t confirm = 0xFF;
+            if (zw111_send_command(0x01, NULL, 0, &confirm, NULL, NULL, 120)) {
+                // SENSOR RESPONDED! Communication working!
+                s_connected = true;
+                s_current_tx = tx;
+                s_current_rx = rx;
+                s_current_baud = baud;
+                ESP_LOGI(TAG, "ZW111 MATCHED! TX=%d, RX=%d, BAUD=%d (confirm=0x%02x)", tx, rx, baud, confirm);
+
+                zw111_refresh_template_count();
+                // Turn OFF default blue light to confirm handshake!
+                zw111_set_led(4, 0, 0, 0);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 static void zw111_knob_task(void *pvParameters) {
     (void)pvParameters;
     uint32_t click_count = 0;
     uint32_t last_click_time = 0;
-    bool last_state = false; // false = unpressed (HIGH), true = pressed (LOW)
+    bool last_state = false;
+    uint32_t last_probe_time = 0;
 
     while (1) {
-        // Only monitor when in IDLE (not waiting for FIDO2 authentication)
+        uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+
+        // In idle, if sensor not yet connected, auto-probe every 2 seconds
+        if (!req_button_pending && !s_connected && (now - last_probe_time > 2000)) {
+            last_probe_time = now;
+            zw111_probe();
+        }
+
+        // Only monitor when in IDLE
         if (!req_button_pending) {
-            bool current_state = (gpio_get_level(GPIO_NUM_0) == 0); // true if knob clicked down
-            uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+            bool current_state = (gpio_get_level(GPIO_NUM_0) == 0);
 
             // Detect button press edge: unpressed -> pressed
             if (current_state && !last_state) {
@@ -192,13 +266,14 @@ static void zw111_knob_task(void *pvParameters) {
                 if (!long_press_handled) {
                     uint32_t total_held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - press_start);
 
-                    if (total_held_ms >= 2500) {
-                        // Long press >= 2.5s: Trigger enrollment!
+                    if (total_held_ms >= 2000) {
+                        // Long press >= 2s: Trigger enrollment!
                         click_count = 0;
                         ESP_LOGI(TAG, "Knob long press detected -> starting enrollment");
+                        if (!s_connected) zw111_probe();
                         zw111_enroll_finger();
-                    } else if (total_held_ms >= 25) {
-                        // Valid click (> 25ms debounce, < 2.5s)
+                    } else if (total_held_ms >= 20) {
+                        // Valid click (> 20ms debounce, < 2s)
                         if (now - last_click_time < 750) {
                             click_count++;
                         } else {
@@ -211,6 +286,7 @@ static void zw111_knob_task(void *pvParameters) {
                             click_count = 0;
                             // TRIPLE CLICK DETECTED!
                             ESP_LOGI(TAG, "Knob TRIPLE-CLICK detected -> starting enrollment!");
+                            if (!s_connected) zw111_probe();
                             zw111_enroll_finger();
                         }
                     }
@@ -231,55 +307,12 @@ static void zw111_knob_task(void *pvParameters) {
 }
 
 bool zw111_init(void) {
-    if (s_initialized) {
-        return s_connected;
+    if (s_initialized && s_connected) {
+        return true;
     }
 
-    uart_config_t uart_cfg = {
-        .baud_rate = ZW111_BAUD_RATE,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-
-    esp_err_t err = uart_driver_install(ZW111_UART_NUM, ZW111_BUF_SIZE, 0, 0, NULL, 0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "uart_driver_install failed: %d", err);
-        return false;
-    }
-
-    uart_param_config(ZW111_UART_NUM, &uart_cfg);
-    uart_set_rx_timeout(ZW111_UART_NUM, 2);
-    uart_set_pin(ZW111_UART_NUM, ZW111_TX_PIN, ZW111_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    // Give ZW111 internal MCU 250ms to boot up completely
-    vTaskDelay(pdMS_TO_TICKS(250));
-
-    s_initialized = true;
-
-    // Verify sensor presence via PS_VfyPwd (0x13)
-    uint8_t pwd[4] = { 0x00, 0x00, 0x00, 0x00 };
-    uint8_t confirm = 0xFF;
-    bool ok = false;
-
-    for (int attempt = 0; attempt < 5; attempt++) {
-        if (zw111_send_command(0x13, pwd, sizeof(pwd), &confirm, NULL, NULL, 150) && confirm == 0x00) {
-            ok = true;
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    s_connected = ok;
-    ESP_LOGI(TAG, "ZW111 init %s (confirm=0x%02x)", ok ? "SUCCESS" : "FAILED", confirm);
-
-    if (ok) {
-        zw111_refresh_template_count();
-        // Turn off LED ring by default in idle
-        zw111_set_led(4, 0, 0, 0);
-    }
+    // Try auto-probe
+    zw111_probe();
 
     // Always create knob task to monitor clicks and holds
     if (s_knob_task_handle == NULL) {
