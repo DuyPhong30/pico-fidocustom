@@ -1108,7 +1108,11 @@ int app_main(void) {
     tembed_display_start();
 
     // 4. Start Kamen Rider Audio Task
-    tembed_audio_start();"""
+    tembed_audio_start();
+
+    // 5. Initialize ZW111 Fingerprint Sensor
+    extern bool zw111_init(void);
+    zw111_init();"""
         content = content.replace(target, replacement, 1)
 
     # Ensure pullup is maintained even when BOOT_PIN is initialized

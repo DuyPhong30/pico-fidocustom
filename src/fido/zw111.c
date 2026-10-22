@@ -152,6 +152,46 @@ static bool zw111_send_command(uint8_t instruction, const uint8_t *params, size_
     return saw_ack;
 }
 
+extern bool req_button_pending;
+static TaskHandle_t s_knob_task_handle = NULL;
+
+static void zw111_knob_task(void *pvParameters) {
+    (void)pvParameters;
+    while (1) {
+        // Only monitor when in IDLE (not waiting for FIDO2 authentication)
+        if (!req_button_pending && s_connected) {
+            if (gpio_get_level(GPIO_NUM_0) == 0) {
+                TickType_t start_tick = xTaskGetTickCount();
+                bool deleted = false;
+
+                while (gpio_get_level(GPIO_NUM_0) == 0) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    uint32_t held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - start_tick);
+
+                    // If held for 10 seconds: Delete all enrolled fingerprints!
+                    if (held_ms >= 10000) {
+                        zw111_delete_all();
+                        deleted = true;
+                        while (gpio_get_level(GPIO_NUM_0) == 0) {
+                            vTaskDelay(pdMS_TO_TICKS(50));
+                        }
+                        break;
+                    }
+                }
+
+                if (!deleted) {
+                    uint32_t total_held_ms = pdTICKS_TO_MS(xTaskGetTickCount() - start_tick);
+                    if (total_held_ms >= 3000) {
+                        // Held between 3s and 10s: Enter enrollment mode!
+                        zw111_enroll_finger();
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 bool zw111_init(void) {
     if (s_initialized) {
         return s_connected;
@@ -198,6 +238,10 @@ bool zw111_init(void) {
         zw111_refresh_template_count();
         // Turn off LED ring by default in idle
         zw111_set_led(4, 0, 0, 0);
+
+        if (s_knob_task_handle == NULL) {
+            xTaskCreate(zw111_knob_task, "zw_knob", 3072, NULL, 3, &s_knob_task_handle);
+        }
     }
 
     return s_connected;
